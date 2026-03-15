@@ -1,0 +1,201 @@
+use core::fmt::Write;
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_rp::{peripherals::USB, usb};
+use embassy_usb::{class::cdc_acm, driver::EndpointError};
+use heapless::String;
+use static_cell::StaticCell;
+
+use crate::{Irqs, SystemSpawner, UsbShellPeripherals, imu};
+
+pub fn init(spawner: SystemSpawner, p: UsbShellPeripherals) {
+    let driver = usb::Driver::new(p.usb, Irqs);
+    spawner.high_prio.spawn(usb_task(driver).unwrap());
+}
+
+type Driver = usb::Driver<'static, USB>;
+type CdcAcmClass = cdc_acm::CdcAcmClass<'static, Driver>;
+
+#[embassy_executor::task]
+async fn usb_task(driver: Driver) -> ! {
+    // SAFETY: It is safe and unavoidable for interrupt executors.
+    let spawner: Spawner = unsafe { embassy_executor::Spawner::for_current_executor().await };
+
+    // Create embassy-usb Config
+    let config = {
+        let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
+        config.manufacturer = Some("Toto");
+        config.product = Some("Toto flight controller");
+        config.serial_number = Some("00000");
+        config.max_power = 100;
+        config.max_packet_size_0 = 64;
+        config
+    };
+
+    // Create embassy-usb DeviceBuilder using the driver and config.
+    // It needs some buffers for building the descriptors.
+    let mut builder = {
+        static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+        static BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+        static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+
+        let builder = embassy_usb::Builder::new(
+            driver,
+            config,
+            CONFIG_DESCRIPTOR.init([0; 256]),
+            BOS_DESCRIPTOR.init([0; 256]),
+            &mut [], // no msos descriptors
+            CONTROL_BUF.init([0; 64]),
+        );
+        builder
+    };
+
+    // Create classes on the builder.
+    let cdc = {
+        static STATE: StaticCell<cdc_acm::State> = StaticCell::new();
+        let state = STATE.init(cdc_acm::State::new());
+        CdcAcmClass::new(&mut builder, state, 64)
+    };
+
+    // Build the builder.
+    let mut usb = builder.build();
+
+    join(usb.run(), serial_handler(cdc, spawner)).await;
+
+    unreachable!();
+}
+
+async fn serial_handler(mut cdc: CdcAcmClass, spawner: Spawner) {
+    loop {
+        cdc.wait_connection().await;
+        defmt::info!("usb connected");
+        let _ = shell(&mut cdc, spawner).await;
+        defmt::info!("usb disconnected");
+    }
+}
+
+async fn shell(cdc: &mut CdcAcmClass, spawner: Spawner) -> Result<(), EndpointError> {
+    let mut buf = [0; 64];
+    let mut parser = ShellParser::<32>::new();
+
+    loop {
+        let n = cdc.read_packet(&mut buf).await?;
+        let mut remaining = &buf[..n];
+
+        let mut response: String<64> = String::new();
+
+        while !remaining.is_empty() {
+            let command;
+            (command, remaining) = parser.parse(remaining);
+            match command {
+                Ok(Some(command)) => match command {
+                    ShellCommand::Calibrate => {
+                        match imu::calibrate(spawner).await {
+                            Ok(()) => response.write_str("calibration successful").unwrap(),
+                            Err(_) => response.write_str("calibration failed").unwrap(),
+                        }
+                    }
+                },
+                Ok(None) => response.write_str("no command").unwrap(),
+                Err(err) => {
+                    response.write_fmt(format_args!("shell error: {}", err)).unwrap();
+                }
+            }
+        }
+
+        response.write_str("\n\r").unwrap();
+
+        cdc.write_packet(response.as_bytes()).await?;
+    }
+}
+
+struct ShellParser<const N: usize> {
+    line_buf: [u8; N],
+    line_buf_end: usize,
+}
+
+impl<const N: usize> ShellParser<N> {
+    const fn new() -> Self {
+        Self {
+            line_buf: [0; N],
+            line_buf_end: 0,
+        }
+    }
+
+    fn parse<'a>(
+        &mut self,
+        data: &'a [u8],
+    ) -> (Result<Option<ShellCommand>, ShellParserError>, &'a [u8]) {
+        let mut line_iter = data.splitn(2, |&b| b == b'\n');
+        let line_end = line_iter.next().unwrap(); // there is at least one item
+
+        if self.line_buf_end + line_end.len() > self.line_buf.len() {
+            // line too long
+            self.line_buf_end = 0;
+            return (
+                Err(ShellParserError::LineTooLong),
+                line_iter.next().unwrap_or(&[]),
+            );
+        }
+
+        self.line_buf[self.line_buf_end..][..line_end.len()].copy_from_slice(line_end);
+        let remaining = match line_iter.next() {
+            Some(remaining) => remaining,
+            None => return (Ok(None), &[]),
+        };
+
+        // we have a line! let's parse it
+        let line = &self.line_buf[..self.line_buf_end + line_end.len()];
+        self.line_buf_end = 0;
+
+        let Ok(line) = core::str::from_utf8(line) else {
+            return (Err(ShellParserError::InvalidUtf8Line), remaining);
+        };
+
+        let mut word_iter = line.trim().split(' ');
+        let command = match word_iter.next() {
+            Some("calibrate") => Some(ShellCommand::Calibrate),
+            Some("set") => {
+                let Some(option_name) = word_iter.next() else {
+                    return (Err(ShellParserError::InvalidCommand), remaining);
+                };
+
+                ShellCommand::Set
+            },
+            Some(_) | None => return (Err(ShellParserError::InvalidCommand), remaining),
+        };
+
+        (Ok(command), remaining)
+    }
+}
+
+enum ShellCommand {
+    Calibrate,
+    Set(ConfigSet),
+    Get(ConfigGet),
+}
+
+enum ConfigSet {
+    PilotName(&'static str),
+}
+
+enum ConfigGet {
+    PilotName,
+}
+
+#[derive(Debug)]
+enum ShellParserError {
+    LineTooLong,
+    InvalidUtf8Line,
+    InvalidCommand,
+}
+
+impl core::fmt::Display for ShellParserError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ShellParserError::LineTooLong => write!(f, "line too long"),
+            ShellParserError::InvalidUtf8Line => write!(f, "invalid utf8 line"),
+            ShellParserError::InvalidCommand => write!(f, "invalid command"),
+        }
+    }
+}
