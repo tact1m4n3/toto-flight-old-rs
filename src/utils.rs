@@ -51,6 +51,14 @@ impl NalgebraQuatExt for UnitQuaternion<f32> {
     const IDENTITY: Self = UnitQuaternion::new_unchecked(Quaternion::new(1.0, 0.0, 0.0, 0.0));
 }
 
+pub fn pack<const N: usize>(s: &str) -> [u8; N] {
+    let mut buf = [0u8; N];
+    let b = s.as_bytes();
+    let len = b.len().min(N);
+    buf[..len].copy_from_slice(&b[..len]);
+    buf
+}
+
 #[macro_export]
 macro_rules! mutex_cells {
     ($($name:ident: $ty:ty = $init:expr);* $(;)?) => {
@@ -58,6 +66,17 @@ macro_rules! mutex_cells {
             pub static $name: embassy_sync::blocking_mutex::Mutex<
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, core::cell::Cell<$ty>
             > = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new($init));
+        )*
+    };
+}
+
+#[macro_export]
+macro_rules! signals {
+    ($($name:ident: $ty:ty);* $(;)?) => {
+        $(
+            pub static $name: embassy_sync::signal::Signal<
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, $ty
+            > = embassy_sync::signal::Signal::new();
         )*
     };
 }

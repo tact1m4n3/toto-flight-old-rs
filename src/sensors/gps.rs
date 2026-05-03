@@ -1,17 +1,15 @@
-use core::cell::Cell;
-
 use embassy_rp::{gpio, uart};
-use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::{Duration, Instant};
 use embedded_io_async::Read;
 use static_cell::StaticCell;
 use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRef};
 
-use crate::{GpsPeripherals, Irqs, SystemSpawner};
+use crate::{GpsPeripherals, Irqs, SystemSpawner, mutex_cells};
 
-static DATA: Mutex<CriticalSectionRawMutex, Cell<Option<Data>>> = Mutex::new(Cell::new(None));
-static PPS_TIMESTAMP: Mutex<CriticalSectionRawMutex, Cell<Option<Instant>>> =
-    Mutex::new(Cell::new(None));
+mutex_cells! {
+    DATA: Option<Data> = None;
+    PPS_TIMESTAMP: Option<Instant> = None;
+}
 
 pub fn init(spawner: SystemSpawner, p: GpsPeripherals) {
     static RX_BUFFER: StaticCell<[u8; 128]> = StaticCell::new();
@@ -75,6 +73,8 @@ pub async fn main_task(mut uart_rx: uart::BufferedUartRx) {
                                     };
 
                                     critical_section::with(|cs| DATA.borrow(cs).set(Some(data)));
+
+                                    // TODO: log data to blackbox
                                 }
                                 _ => {}
                             }

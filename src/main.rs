@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
 
+mod black_box;
 mod control;
-mod gps;
-mod imu;
+mod drivers;
 mod motor_output;
-mod multimeter;
+mod persistent_config;
 mod receiver;
-mod sd_card;
-mod usb_shell;
+mod sensors;
+mod usb_interface;
 mod utils;
 
 use assign_resources::assign_resources;
@@ -19,12 +19,12 @@ use embassy_rp::{
     interrupt::{self, InterruptExt},
     peripherals, uart, usb,
 };
-
-use defmt_rtt as _;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Instant;
-use panic_probe as _;
 use static_cell::StaticCell;
+
+use defmt_rtt as _;
+use panic_probe as _;
 
 assign_resources! {
     multicore: MulticorePeripherals {
@@ -33,7 +33,7 @@ assign_resources! {
     led: LedPeripherals {
         pin: PIN_45,
     },
-    usb_shell: UsbShellPeripherals {
+    usb: UsbPeripherals {
         usb: USB,
     },
     pwm_outputs: PwmOutputsPeripherals {
@@ -74,7 +74,13 @@ assign_resources! {
         clk_pin: PIN_34,
         mosi_pin: PIN_35,
         miso_pin: PIN_36,
+        tx_dma: DMA_CH2,
+        rx_dma: DMA_CH3,
         cs_pin: PIN_39,
+    },
+    flash: FlashPeripherals {
+        flash: FLASH,
+        dma: DMA_CH4,
     },
 }
 
@@ -85,7 +91,7 @@ fn main() -> ! {
     let r = split_resources!(p);
 
     interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P3); // realtime
-    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P1); // high
+    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P2); // high
     interrupt::SWI_IRQ_2.set_priority(interrupt::Priority::P0); // low
 
     interrupt::TIMER0_IRQ_0.set_priority(interrupt::Priority::P3);
@@ -94,7 +100,7 @@ fn main() -> ! {
 
     interrupt::UART0_IRQ.set_priority(interrupt::Priority::P2);
     interrupt::UART1_IRQ.set_priority(interrupt::Priority::P2);
-    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P1);
 
     let spawner = SystemSpawner {
         realtime: REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0),
@@ -110,47 +116,35 @@ fn main() -> ! {
 
 #[embassy_executor::task]
 pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
-    let mut maybe_storage = sd_card::Storage::new(r.sd_card).ok();
-    if matches!(maybe_storage, None) {
-        defmt::warn!("sd_card initialization failed");
-    }
+    persistent_config::init(r.flash).await;
 
     let i2c_device = init_i2c(r.i2c_bus);
 
-    imu::init(spawner, r.imu).await.unwrap();
     control::init(spawner);
-    motor_output::init(spawner, r.pwm_outputs);
 
     receiver::init(spawner, r.receiver);
-    gps::init(spawner, r.gps);
 
-    multimeter::init(spawner, i2c_device.clone()).await.unwrap();
+    motor_output::init(spawner, r.pwm_outputs);
 
-    usb_shell::init(spawner, r.usb_shell);
+    sensors::imu::init(spawner, r.imu).await.unwrap();
+    sensors::gps::init(spawner, r.gps);
+    sensors::multimeter::init(spawner, i2c_device.clone())
+        .await
+        .unwrap();
+
+    usb_interface::init(spawner, r.usb);
+
+    if let Err(err) = black_box::init(spawner, r.sd_card).await {
+        defmt::warn!("failed to initialize black box logging: {}", err);
+    }
 
     let mut last = Instant::now();
     let mut idle_ticks: u64 = 0;
 
     let mut idle_led = gpio::Output::new(r.led.pin, gpio::Level::Low);
-
     loop {
         let before = Instant::now();
-
-        if let Some(mut storage) = maybe_storage.take() {
-            match storage.tick() {
-                Ok(()) => maybe_storage = Some(storage),
-                Err(embedded_sdmmc::Error::DeviceError(err)) => {
-                    defmt::error!("storage: sd card: {}", err)
-                }
-                Err(err) => {
-                    defmt::warn!("storage: other: {}", err);
-                    maybe_storage = Some(storage);
-                }
-            }
-        }
-
         cortex_m::asm::wfe();
-
         idle_ticks += (Instant::now() - before).as_micros();
 
         let now = Instant::now();
@@ -160,6 +154,15 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
             defmt::info!("cpu: {}%", cpu);
             idle_ticks = 0;
             last = now;
+
+            let (gyro, accel) = critical_section::with(|cs| {
+                (
+                    sensors::imu::GYRO.borrow(cs).get(),
+                    sensors::imu::ACCEL.borrow(cs).get(),
+                )
+            });
+            defmt::debug!("gyro: {} {} {}", gyro.x, gyro.y, gyro.z);
+            defmt::debug!("accel: {} {} {}", accel.x, accel.y, accel.z);
 
             idle_led.toggle();
         }

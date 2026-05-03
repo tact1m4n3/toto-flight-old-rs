@@ -1,22 +1,8 @@
 MEMORY {
-    /*
-     * The RP2350 has either external or internal flash.
-     *
-     * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
-     */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
-    /*
-     * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
-     * This is usually good for performance, as it distributes load on
-     * those banks evenly.
-     */
+    /* Although the flight controller has 16 megabytes of flash we skip the
+     * last megabyte for persistent configuration. */
+    FLASH : ORIGIN = 0x10000000, LENGTH = 15 * 1024K
     RAM : ORIGIN = 0x20000000, LENGTH = 512K
-    /*
-     * RAM banks 8 and 9 use a direct mapping. They can be used to have
-     * memory areas dedicated for some specific job, improving predictability
-     * of access times.
-     * Example: Separate stacks for core0 and core1.
-     */
     SRAM8 : ORIGIN = 0x20080000, LENGTH = 4K
     SRAM9 : ORIGIN = 0x20081000, LENGTH = 4K
 }

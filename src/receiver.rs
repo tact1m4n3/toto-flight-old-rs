@@ -1,22 +1,19 @@
-use core::cell::Cell;
-
 use embassy_rp::uart;
-use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
 use embedded_io_async::Read;
 use static_cell::StaticCell;
 
-use crate::{Irqs, ReceiverPeripherals};
+use crate::{Irqs, ReceiverPeripherals, mutex_cells};
 
-pub static CHANNELS: Mutex<CriticalSectionRawMutex, Cell<([u16; 16], Instant)>> =
-    Mutex::new(Cell::new(([0; 16], Instant::MIN)));
-pub static LINK_STATS: Mutex<CriticalSectionRawMutex, Cell<LinkStatistics>> =
-    Mutex::new(Cell::new(LinkStatistics {
+mutex_cells! {
+    CHANNELS: ([u16; 16], Instant) = ([0; 16], Instant::MIN);
+    LINK_STATS: LinkStatistics = LinkStatistics {
         uplink_link_quality: 0,
         downlink_link_quality: 0,
         uplink_rssi: 255,
         downlink_rssi: 255,
-    }));
+    };
+}
 
 pub fn init(spawner: crate::SystemSpawner, p: ReceiverPeripherals) {
     static RX_BUFFER: StaticCell<[u8; 2 * crsf::MAX_PACKET_LEN]> = StaticCell::new();

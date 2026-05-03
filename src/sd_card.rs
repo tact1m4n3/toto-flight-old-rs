@@ -21,8 +21,6 @@ pub type VolumeManager =
 
 pub type Result<T> = core::result::Result<T, embedded_sdmmc::Error<embedded_sdmmc::SdCardError>>;
 
-const BLACKBOX_NAME_HEADER: &str = "LOG";
-
 pub struct Storage {
     volume_manager: VolumeManager,
     config_manager: config::Manager,

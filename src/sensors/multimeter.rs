@@ -67,5 +67,7 @@ async fn task(mut ina226: INA226<SharedI2cDevice, ina226_tp::Operational>) {
             CURRENT.borrow(cs).set(instant_current);
             CURRENT_DRAW.borrow(cs).set(current_consumption);
         });
+
+        // TODO: log data to blackbox
     }
 }

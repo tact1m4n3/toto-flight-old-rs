@@ -6,11 +6,11 @@ use embassy_usb::{class::cdc_acm, driver::EndpointError};
 use heapless::String;
 use static_cell::StaticCell;
 
-use crate::{Irqs, SystemSpawner, UsbShellPeripherals, imu};
+use crate::{Irqs, SystemSpawner, UsbPeripherals, sensors::imu};
 
-pub fn init(spawner: SystemSpawner, p: UsbShellPeripherals) {
+pub fn init(spawner: SystemSpawner, p: UsbPeripherals) {
     let driver = usb::Driver::new(p.usb, Irqs);
-    spawner.high_prio.spawn(usb_task(driver).unwrap());
+    spawner.low_prio.spawn(usb_task(driver).unwrap());
 }
 
 type Driver = usb::Driver<'static, USB>;
@@ -69,6 +69,7 @@ async fn serial_handler(mut cdc: CdcAcmClass, spawner: Spawner) {
     loop {
         cdc.wait_connection().await;
         defmt::info!("usb connected");
+        // TODO: acquire arm lock
         let _ = shell(&mut cdc, spawner).await;
         defmt::info!("usb disconnected");
     }
@@ -87,25 +88,25 @@ async fn shell(cdc: &mut CdcAcmClass, spawner: Spawner) -> Result<(), EndpointEr
         while !remaining.is_empty() {
             let command;
             (command, remaining) = parser.parse(remaining);
+            response.write_str("\n\r").unwrap();
             match command {
                 Ok(Some(command)) => match command {
                     ShellCommand::Calibrate => {
-                        match imu::calibrate(spawner).await {
+                        match imu::calibrate(spawner) {
                             Ok(()) => response.write_str("calibration successful").unwrap(),
                             Err(_) => response.write_str("calibration failed").unwrap(),
                         }
                     }
                 },
-                Ok(None) => response.write_str("no command").unwrap(),
+                Ok(None) => continue,
                 Err(err) => {
                     response.write_fmt(format_args!("shell error: {}", err)).unwrap();
                 }
             }
+
+            response.write_str("\n\r").unwrap();
+            cdc.write_packet(response.as_bytes()).await?;
         }
-
-        response.write_str("\n\r").unwrap();
-
-        cdc.write_packet(response.as_bytes()).await?;
     }
 }
 
@@ -139,13 +140,15 @@ impl<const N: usize> ShellParser<N> {
         }
 
         self.line_buf[self.line_buf_end..][..line_end.len()].copy_from_slice(line_end);
+        self.line_buf_end += line_end.len();
+
         let remaining = match line_iter.next() {
             Some(remaining) => remaining,
             None => return (Ok(None), &[]),
         };
 
         // we have a line! let's parse it
-        let line = &self.line_buf[..self.line_buf_end + line_end.len()];
+        let line = &self.line_buf[..self.line_buf_end];
         self.line_buf_end = 0;
 
         let Ok(line) = core::str::from_utf8(line) else {
@@ -155,13 +158,13 @@ impl<const N: usize> ShellParser<N> {
         let mut word_iter = line.trim().split(' ');
         let command = match word_iter.next() {
             Some("calibrate") => Some(ShellCommand::Calibrate),
-            Some("set") => {
-                let Some(option_name) = word_iter.next() else {
-                    return (Err(ShellParserError::InvalidCommand), remaining);
-                };
-
-                ShellCommand::Set
-            },
+            // Some("set") => {
+            //     let Some(option_name) = word_iter.next() else {
+            //         return (Err(ShellParserError::InvalidCommand), remaining);
+            //     };
+            //
+            //     ShellCommand::Set
+            // },
             Some(_) | None => return (Err(ShellParserError::InvalidCommand), remaining),
         };
 
@@ -171,8 +174,8 @@ impl<const N: usize> ShellParser<N> {
 
 enum ShellCommand {
     Calibrate,
-    Set(ConfigSet),
-    Get(ConfigGet),
+    // Set(ConfigSet),
+    // Get(ConfigGet),
 }
 
 enum ConfigSet {
