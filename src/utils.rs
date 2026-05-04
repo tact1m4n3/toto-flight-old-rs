@@ -1,5 +1,10 @@
-use core::ops::Range;
+use core::{cell::RefCell, ops::Range};
 
+use embassy_sync::blocking_mutex::{
+    Mutex,
+    raw::{CriticalSectionRawMutex, RawMutex},
+};
+use embassy_time::Instant;
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
 pub const US_TO_ZERO_ONE: Mapping = Mapping {
@@ -63,7 +68,7 @@ pub fn pack<const N: usize>(s: &str) -> [u8; N] {
 macro_rules! mutex_cells {
     ($($name:ident: $ty:ty = $init:expr);* $(;)?) => {
         $(
-            pub static $name: embassy_sync::blocking_mutex::Mutex<
+            static $name: embassy_sync::blocking_mutex::Mutex<
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, core::cell::Cell<$ty>
             > = embassy_sync::blocking_mutex::Mutex::new(core::cell::Cell::new($init));
         )*
@@ -74,9 +79,78 @@ macro_rules! mutex_cells {
 macro_rules! signals {
     ($($name:ident: $ty:ty);* $(;)?) => {
         $(
-            pub static $name: embassy_sync::signal::Signal<
+            static $name: embassy_sync::signal::Signal<
                 embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, $ty
             > = embassy_sync::signal::Signal::new();
         )*
     };
+}
+
+pub struct SyncWatch<T: Copy> {
+    state: Mutex<CriticalSectionRawMutex, RefCell<SyncWatchState<T>>>,
+}
+
+struct SyncWatchState<T: Copy> {
+    value: T,
+    update_timestamp: Instant,
+}
+
+impl<T: Copy> SyncWatch<T> {
+    pub const fn new(initial_value: T) -> Self {
+        Self {
+            state: Mutex::new(RefCell::new(SyncWatchState {
+                value: initial_value,
+                update_timestamp: Instant::MIN,
+            })),
+        }
+    }
+
+    pub fn watcher(&self) -> SyncWatchReader<T> {
+        SyncWatchReader {
+            state: &self.state,
+            last_read_timestamp: None,
+        }
+    }
+
+    pub fn get(&self) -> T {
+        self.state.lock(|state| state.borrow().value)
+    }
+
+    pub fn get_with_timestamp(&self) -> (T, Instant) {
+        self.state.lock(|state| {
+            let state = state.borrow();
+            (state.value, state.update_timestamp)
+        })
+    }
+
+    pub fn set(&self, new_value: T) {
+        self.set_with_timestamp(new_value, Instant::now());
+    }
+
+    pub fn set_with_timestamp(&self, new_value: T, timestamp: Instant) {
+        self.state.lock(|state| {
+            *state.borrow_mut() = SyncWatchState {
+                value: new_value,
+                update_timestamp: timestamp,
+            };
+        });
+    }
+}
+
+pub struct SyncWatchReader<'a, T: Copy> {
+    state: &'a Mutex<CriticalSectionRawMutex, RefCell<SyncWatchState<T>>>,
+    last_read_timestamp: Option<Instant>,
+}
+
+impl<'a, T: Copy> SyncWatchReader<'a, T> {
+    pub fn get_if_changed(&mut self) -> Option<(T, Instant)> {
+        self.state.lock(|state| {
+            let state = state.borrow();
+            if let Some(last_read_timestamp) = self.last_read_timestamp && state.update_timestamp <= last_read_timestamp {
+                return None;
+            }
+            self.last_read_timestamp = Some(state.update_timestamp);
+            Some((state.value, state.update_timestamp))
+        })
+    }
 }

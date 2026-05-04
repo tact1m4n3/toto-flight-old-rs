@@ -1,18 +1,28 @@
 use embassy_time::{Duration, Ticker};
 use ina226_tp::{INA226, InaAverage, InaMode, InaVbusct, InaVshct, MaskEnable, SlaveAddressing};
 
-use crate::{SharedI2cDevice, SystemSpawner, mutex_cells};
+use crate::{SharedI2cDevice, SystemSpawner, utils::SyncWatch};
 
 const SHUNT_RESISTANCE: f64 = 0.02;
 const MAX_CURRENT: f64 = 50.0;
 
-// TODO: Maybe we should use f32 instead of f64 (the driver uses this).
+pub static DATA: SyncWatch<Data> = SyncWatch::new(Data {
+    voltage: 0.0,
+    current: 0.0,
+    total_current: 0.0,
+});
 
-mutex_cells! {
-    VOLTAGE: f64 = 0.0;
-    CURRENT: f64 = 0.0;
-    CURRENT_DRAW: f64 = 0.0;
+#[derive(Clone, Copy)]
+pub struct Data {
+    /// in V
+    pub voltage: f32,
+    /// in A
+    pub current: f32,
+    /// in mAh
+    pub total_current: f32,
 }
+
+// TODO: Maybe we should use f32 instead of f64 (the driver uses this).
 
 pub async fn init(
     spawner: SystemSpawner,
@@ -49,25 +59,23 @@ const DT: f64 = 1.0 / FREQ_HZ as f64;
 async fn task(mut ina226: INA226<SharedI2cDevice, ina226_tp::Operational>) {
     let mut ticker = Ticker::every(Duration::from_hz(10));
 
+    let mut prev_current = 0.0;
+    let mut total_current = 0.0;
+
     loop {
         ticker.next().await;
 
         let instant_voltage = ina226.read_voltage().await;
         let instant_current = ina226.read_current().await;
 
-        let (prev_current, prev_current_consumption) =
-            critical_section::with(|cs| (CURRENT.borrow(cs).get(), CURRENT_DRAW.borrow(cs).get()));
-
         // trapezoidal integration
-        let current_consumption =
-            prev_current_consumption + (prev_current + instant_current) * DT / 2.0;
+        total_current += ((prev_current + instant_current) / 2.0) * DT * 3600.0;
+        prev_current = instant_current;
 
-        critical_section::with(|cs| {
-            VOLTAGE.borrow(cs).set(instant_voltage);
-            CURRENT.borrow(cs).set(instant_current);
-            CURRENT_DRAW.borrow(cs).set(current_consumption);
+        DATA.set(Data {
+            voltage: instant_voltage as f32,
+            current: instant_current as f32,
+            total_current: total_current as f32,
         });
-
-        // TODO: log data to blackbox
     }
 }

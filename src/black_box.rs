@@ -4,18 +4,20 @@ use core::{
 };
 
 use block_device_adapters::BufStreamError;
+use embassy_futures::select::{Either, select};
 use embassy_rp::{gpio, peripherals::SPI0, spi};
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pipe::Pipe};
-use embassy_time::{Delay, Instant};
+use embassy_time::{Delay, Duration, Ticker};
 use embedded_fatfs::FsOptions;
 use embedded_hal_bus::spi::ExclusiveDevice;
-use futures::FutureExt;
-use nalgebra::Vector3;
 use embedded_io_async::Write;
+use heapless::String;
 
-use crate::{Irqs, SdCardPeripherals, SystemSpawner, black_box::logger::Logger, signals};
+use crate::{
+    Irqs, SdCardPeripherals, SystemSpawner, black_box::ardupilot_black_box_format::Logger,
+    nav_loop, pid_loop, receiver, sensors::imu, signals,
+};
 
-mod logger;
+mod ardupilot_black_box_format;
 
 type SpiBus = spi::Spi<'static, SPI0, spi::Async>;
 type CsPin = gpio::Output<'static>;
@@ -48,23 +50,11 @@ const MAX_LOG_ID: u32 = 999;
 const LOG_FILE_EXTENSION: &str = "BIN";
 const MAX_FILE_NAME_LEN: usize = LOG_FILE_PREFIX.len() + 3 + ".".len() + LOG_FILE_EXTENSION.len();
 const _: () = assert!(MAX_FILE_NAME_LEN <= 11);
-
-const MESSAGE_QUEUE_LEN: usize = 64;
+const LOG_RATE_HZ: u64 = 1000;
 
 static RECORD: AtomicBool = AtomicBool::new(false);
-static MESSAGE_QUEUE: Pipe<CriticalSectionRawMutex, MESSAGE_QUEUE_LEN> = Pipe::new();
 signals! {
-    NEXT_FILE: ();
-    GYRO: (Vector3<f32>, Instant);
-    ACCEL: (Vector3<f32>, Instant);
-}
-
-pub fn set_recording_enabled(enable: bool) {
-    RECORD.store(enable, Ordering::Release);
-}
-
-pub fn write_message(msg: &str) -> bool {
-    MESSAGE_QUEUE.try_write(msg.as_bytes()).is_ok()
+    NEW_FILE: ();
 }
 
 pub async fn init(spawner: SystemSpawner, p: SdCardPeripherals) -> Result<()> {
@@ -85,7 +75,7 @@ pub async fn init(spawner: SystemSpawner, p: SdCardPeripherals) -> Result<()> {
 
     // up the frequency after initialization
     let mut config = spi::Config::default();
-    config.frequency = 25_000_000;
+    config.frequency = 20_000_000;
     sd_card.spi().bus_mut().set_config(&config);
 
     let fs = FileSystem::new(BufStream::new(sd_card), FsOptions::new()).await?;
@@ -93,6 +83,14 @@ pub async fn init(spawner: SystemSpawner, p: SdCardPeripherals) -> Result<()> {
     spawner.low_prio.spawn(task(fs).unwrap());
 
     Ok(())
+}
+
+pub fn set_recording_enabled(enable: bool) {
+    RECORD.store(enable, Ordering::Release);
+}
+
+pub fn begin_new_file() {
+    NEW_FILE.signal(());
 }
 
 #[embassy_executor::task]
@@ -107,18 +105,24 @@ async fn task(fs: FileSystem) {
         }
     };
 
+    // to not create a new useless file on every boot
+    NEW_FILE.wait().await;
+
     loop {
         if next_log_id > MAX_LOG_ID {
             defmt::warn!("black box log files limit reached... how did you do that?");
             return;
         }
 
-        if let Err(err) = create_log_file(root.clone(), next_log_id).await {
-            defmt::warn!("failed to create log file: {}", err);
-            return;
-        }
+        let file = match create_log_file(root.clone(), next_log_id).await {
+            Ok(file) => file,
+            Err(err) => {
+                defmt::warn!("failed to create log file: {}", err);
+                return;
+            }
+        };
 
-        match log_loop(root.clone(), next_log_id).await {
+        match log_loop(file).await {
             Ok(()) => (),
             // means we exceeded 4GB file in which case we just create another file
             Err(Error::WriteZero) => (),
@@ -132,26 +136,100 @@ async fn task(fs: FileSystem) {
     }
 }
 
-async fn log_loop(root: Dir<'_>, log_id: u32) -> Result<()> {
-    let file = create_log_file(root, log_id).await?;
+async fn log_loop(file: File<'_>) -> Result<()> {
     let mut l = Logger { writer: file };
     l.write_header().await?;
 
-    defmt::debug!("beginning new log file with id: {}", log_id);
+    defmt::debug!("beginning new log file");
 
-    let mut msg_buf: [u8; MESSAGE_QUEUE_LEN] = [0; MESSAGE_QUEUE_LEN];
+    let t = embassy_time::Instant::now().as_micros();
+    let gyro_bias = imu::get_gyro_bias();
+    let accel_bias = imu::get_accel_bias();
+    l.write_parm(t, "GYRO_BIAS_X", gyro_bias.x as f64).await?;
+    l.write_parm(t, "GYRO_BIAS_Y", gyro_bias.y as f64).await?;
+    l.write_parm(t, "GYRO_BIAS_Z", gyro_bias.z as f64).await?;
+    l.write_parm(t, "ACCEL_BIAS_X", accel_bias.x as f64).await?;
+    l.write_parm(t, "ACCEL_BIAS_Y", accel_bias.y as f64).await?;
+    l.write_parm(t, "ACCEL_BIAS_Z", accel_bias.z as f64).await?;
+
+    let mut gyro_watcher = imu::GYRO.watcher();
+    let mut accel_watcher = imu::ACCEL.watcher();
+    let mut motor_watcher = pid_loop::MOTOR_OUTPUT.watcher();
+    let mut target_watcher = nav_loop::TARGET.watcher();
+    let mut channels_watcher = receiver::CHANNELS.watcher();
+    let mut link_stats_watcher = receiver::LINK_STATS.watcher();
+    let mut multimeter_watcher = crate::sensors::multimeter::DATA.watcher();
+
+    let mut ticker = Ticker::every(Duration::from_hz(LOG_RATE_HZ));
     loop {
-        futures::select_biased! {
-            _ = NEXT_FILE.wait().fuse() => break,
-            (gyro, timestamp) = GYRO.wait().fuse() => if are_we_recording() { l.write_gyro(timestamp.as_micros(), gyro).await? },
-            (accel, timestamp) = ACCEL.wait().fuse() => if are_we_recording() { l.write_accel(timestamp.as_micros(), accel).await? },
-            n = MESSAGE_QUEUE.read(&mut msg_buf).fuse() => {
-                // TODO: maybe we should split messages into separate packets?
-                let msg = core::str::from_utf8(&msg_buf[..n]).unwrap();
-                let time_us = Instant::now().as_micros();
-                l.write_message(time_us, msg).await?;
-            },
-        };
+        match select(NEW_FILE.wait(), ticker.next()).await {
+            Either::First(()) => break,
+            Either::Second(()) => (),
+        }
+
+        if let Some((gyro, timestamp)) = gyro_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            l.write_gyro(timestamp.as_micros(), gyro).await?;
+        }
+
+        if let Some((accel, timestamp)) = accel_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            l.write_accel(timestamp.as_micros(), accel).await?;
+        }
+
+        if let Some((motor, _timestamp)) = motor_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            l.write_motor_output(
+                embassy_time::Instant::now().as_micros(),
+                motor.throttle,
+                motor.left_elevon,
+                motor.right_elevon,
+            )
+            .await?;
+        }
+
+        if let Some((target, _timestamp)) = target_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            if let Some(t) = target {
+                l.write_nav_target(
+                    embassy_time::Instant::now().as_micros(),
+                    t.throttle,
+                    (t.rate.x, t.rate.y, t.rate.z),
+                )
+                .await?;
+            }
+        }
+
+        if let Some((channels, timestamp)) = channels_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            l.write_rc_channels(timestamp.as_micros(), &channels).await?;
+        }
+
+        if let Some((stats, timestamp)) = link_stats_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            l.write_rc_link_stats(
+                timestamp.as_micros(),
+                stats.uplink_link_quality,
+                stats.uplink_rssi,
+                stats.downlink_link_quality,
+                stats.downlink_rssi,
+            )
+            .await?;
+        }
+
+        if let Some((data, timestamp)) = multimeter_watcher.get_if_changed()
+            && are_we_recording()
+        {
+            l.write_bat(timestamp.as_micros(), data.voltage, data.current, data.total_current)
+                .await?;
+        }
+
         l.writer.flush().await?;
     }
 
@@ -185,7 +263,7 @@ async fn find_next_black_box_log_id(root: Dir<'_>) -> Result<u32> {
 }
 
 async fn create_log_file(root: Dir<'_>, log_id: u32) -> Result<File<'_>> {
-    let mut log_file_name = heapless::String::<MAX_FILE_NAME_LEN>::new();
+    let mut log_file_name = String::<MAX_FILE_NAME_LEN>::new();
     log_file_name.clear();
     log_file_name
         .write_fmt(format_args!(

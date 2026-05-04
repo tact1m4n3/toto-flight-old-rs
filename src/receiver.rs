@@ -1,18 +1,23 @@
 use embassy_rp::uart;
-use embassy_time::Instant;
 use embedded_io_async::Read;
 use static_cell::StaticCell;
 
-use crate::{Irqs, ReceiverPeripherals, mutex_cells};
+use crate::{Irqs, ReceiverPeripherals, utils::SyncWatch};
 
-mutex_cells! {
-    CHANNELS: ([u16; 16], Instant) = ([0; 16], Instant::MIN);
-    LINK_STATS: LinkStatistics = LinkStatistics {
-        uplink_link_quality: 0,
-        downlink_link_quality: 0,
-        uplink_rssi: 255,
-        downlink_rssi: 255,
-    };
+pub static CHANNELS: SyncWatch<[u16; 16]> = SyncWatch::new([1500; 16]);
+pub static LINK_STATS: SyncWatch<LinkStats> = SyncWatch::new(LinkStats {
+    uplink_link_quality: 0,
+    uplink_rssi: 0,
+    downlink_link_quality: 0,
+    downlink_rssi: 0,
+});
+
+#[derive(Clone, Copy)]
+pub struct LinkStats {
+    pub uplink_link_quality: u8,
+    pub uplink_rssi: u8,
+    pub downlink_link_quality: u8,
+    pub downlink_rssi: u8,
 }
 
 pub fn init(spawner: crate::SystemSpawner, p: ReceiverPeripherals) {
@@ -61,11 +66,10 @@ async fn packet_receiver(mut uart_rx: uart::BufferedUartRx) {
                 crsf::Packet::RcChannelsPacked(raw_channels) => {
                     let us_channels: [u16; 16] =
                         core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
-                    let timestamp = Instant::now();
-                    critical_section::with(|cs| CHANNELS.borrow(cs).set((us_channels, timestamp)));
+                    CHANNELS.set(us_channels);
                 }
                 crsf::Packet::LinkStatistics(ls) => {
-                    let link_stats = LinkStatistics {
+                    let link_stats = LinkStats {
                         uplink_link_quality: ls.uplink_link_quality,
                         uplink_rssi: if ls.active_antenna == 1 {
                             ls.uplink_rssi_1
@@ -75,7 +79,7 @@ async fn packet_receiver(mut uart_rx: uart::BufferedUartRx) {
                         downlink_link_quality: ls.downlink_link_quality,
                         downlink_rssi: ls.downlink_rssi,
                     };
-                    critical_section::with(|cs| LINK_STATS.borrow(cs).set(link_stats));
+                    LINK_STATS.set(link_stats);
                 }
                 _ => {}
             }
@@ -90,11 +94,4 @@ fn crsf_read_raw_rc(raw: u16) -> u16 {
     debug_assert!(raw >= crsf::RcChannelsPacked::CHANNEL_VALUE_MIN);
     debug_assert!(raw <= crsf::RcChannelsPacked::CHANNEL_VALUE_MAX);
     return ((raw as u32) * 1024 / 1639 + 881) as u16;
-}
-
-pub struct LinkStatistics {
-    pub uplink_link_quality: u8,
-    pub uplink_rssi: u8,
-    pub downlink_link_quality: u8,
-    pub downlink_rssi: u8,
 }

@@ -1,15 +1,16 @@
 #![no_std]
 #![no_main]
+#![recursion_limit = "256"]
 
 mod black_box;
-mod control;
+mod nav_loop;
 mod drivers;
-mod motor_output;
 mod persistent_config;
 mod receiver;
 mod sensors;
 mod usb_interface;
 mod utils;
+mod pid_loop;
 
 use assign_resources::assign_resources;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -120,11 +121,10 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
 
     let i2c_device = init_i2c(r.i2c_bus);
 
-    control::init(spawner);
+    pid_loop::init(spawner, r.pwm_outputs);
+    nav_loop::init(spawner);
 
     receiver::init(spawner, r.receiver);
-
-    motor_output::init(spawner, r.pwm_outputs);
 
     sensors::imu::init(spawner, r.imu).await.unwrap();
     sensors::gps::init(spawner, r.gps);
@@ -154,16 +154,6 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
             defmt::info!("cpu: {}%", cpu);
             idle_ticks = 0;
             last = now;
-
-            let (gyro, accel) = critical_section::with(|cs| {
-                (
-                    sensors::imu::GYRO.borrow(cs).get(),
-                    sensors::imu::ACCEL.borrow(cs).get(),
-                )
-            });
-            defmt::debug!("gyro: {} {} {}", gyro.x, gyro.y, gyro.z);
-            defmt::debug!("accel: {} {} {}", accel.x, accel.y, accel.z);
-
             idle_led.toggle();
         }
     }
@@ -258,156 +248,3 @@ fn panic() -> ! {
 //     throttle,
 //     rate_full_pid_controller.update(&target_rates, &gyro, sensors::IMU_FREQ_DT),
 // )
-
-// #[embassy_executor::task]
-// async fn pid_loop(imu_p: Imu, motor_output: MotorOutput) {
-//     let imu_spi = {
-//         let mut config = spi::Config::default();
-//         config.frequency = 2_000_000;
-//         spi::Spi::new_blocking(
-//             imu_p.spi,
-//             imu_p.clk_pin,
-//             imu_p.mosi_pin,
-//             imu_p.miso_pin,
-//             config,
-//         )
-//     };
-//     let imu_spi_cs = gpio::Output::new(imu_p.cs_pin, gpio::Level::High);
-//     let imu_spi_dev =
-//         embedded_hal_bus::spi::ExclusiveDevice::new(imu_spi, imu_spi_cs, embassy_time::Delay)
-//             .unwrap();
-//
-//     let mut esc_output = {
-//         let mut config = pwm::Config::default();
-//         config.top = ESC_PWM_TOP;
-//         config.divider = FixedU16::from_num(1000 / ESC_PWM_PERIOD_MS);
-//         let (Some(esc_output), None) =
-//             pwm::Pwm::new_output_a(motor_output.slice_esc, motor_output.esc, config).split()
-//         else {
-//             unreachable!()
-//         };
-//         esc_output
-//     };
-//
-//     let (mut left_elevon_output, mut right_elevon_output) = {
-//         let mut config = pwm::Config::default();
-//         config.top = ELEVON_PWM_TOP;
-//         config.divider = FixedU16::from_num(1000 / ELEVON_PWM_PERIOD_MS);
-//         let (Some(left_elevon), Some(right_elevon)) = pwm::Pwm::new_output_ab(
-//             motor_output.slice12,
-//             motor_output._1,
-//             motor_output._2,
-//             config,
-//         )
-//         .split() else {
-//             unreachable!()
-//         };
-//
-//         (left_elevon, right_elevon)
-//     };
-//
-//     let mut imu = ICM42688::new(imu_spi_dev)
-//         .initialize(
-//             embassy_time::Delay,
-//             icm426xx::Config {
-//                 rate: icm426xx::OutputDataRate::Hz1000,
-//                 ..Default::default()
-//             },
-//         )
-//         .unwrap();
-//
-//     let mut madgwick_filter = ahrs::Madgwick::new(0.001, 0.01);
-//
-//     let mut last_tick = Instant::now();
-//     loop {
-//         let sample = loop {
-//             match imu.read_sample() {
-//                 Ok(Some((sample, more_to_read))) => {
-//                     if more_to_read {
-//                         imu.reset_fifo().ok();
-//                     }
-//                     break sample;
-//                 }
-//                 Ok(None) => (),
-//                 Err(err) => {
-//                     defmt::error!("failed to read imu: {}", err);
-//                 }
-//             }
-//         };
-//
-//         let Some(gyro) = sample.gyro else {
-//             defmt::error!("no sample from gyro");
-//             continue;
-//         };
-//         let gyro = Vector3::new(gyro.0, gyro.1, gyro.2);
-//
-//         let Some(accel) = sample.accel else {
-//             defmt::error!("no sample from accel");
-//             continue;
-//         };
-//         let accel = Vector3::new(accel.0, accel.1, accel.2);
-//
-//         let Ok(orientation) = madgwick_filter.update_imu(&gyro, &accel) else {
-//             defmt::error!("failed to update madgwick filter");
-//             continue;
-//         };
-//
-//         let throttle_value: f32;
-//         let left_elevon_value: f32;
-//         let right_elevon_value: f32;
-//
-//         let receiver_channels = RECEIVER_CHANNELS.lock(|channels| channels.get());
-//         match RemoteCommand::from_channels(&receiver_channels) {
-//             RemoteCommand::Manual {
-//                 throttle,
-//                 roll,
-//                 pitch,
-//                 ..
-//             } => {
-//                 throttle_value = throttle;
-//                 left_elevon_value = (roll + pitch) / 2.;
-//                 right_elevon_value = (roll - pitch) / 2.;
-//             }
-//             RemoteCommand::Assisted {
-//                 speed_delta,
-//                 roll,
-//                 altitude_delta,
-//             } => {
-//                 throttle_value = 0.;
-//                 left_elevon_value = 0.;
-//                 right_elevon_value = 0.;
-//             }
-//             RemoteCommand::Autonomous => {
-//                 throttle_value = 0.;
-//                 left_elevon_value = 0.;
-//                 right_elevon_value = 0.;
-//             }
-//         }
-//
-//         esc_output
-//             .set_duty_cycle(us_to_duty(
-//                 _0_1_to_us(throttle_value),
-//                 ESC_PWM_PERIOD_MS,
-//                 ESC_PWM_TOP,
-//             ))
-//             .ok();
-//         left_elevon_output
-//             .set_duty_cycle(us_to_duty(
-//                 neg1_1_to_us(left_elevon_value),
-//                 ELEVON_PWM_PERIOD_MS,
-//                 ELEVON_PWM_TOP,
-//             ))
-//             .ok();
-//         right_elevon_output
-//             .set_duty_cycle(us_to_duty(
-//                 neg1_1_to_us(right_elevon_value),
-//                 ELEVON_PWM_PERIOD_MS,
-//                 ELEVON_PWM_TOP,
-//             ))
-//             .ok();
-//
-//         let next_tick = last_tick + Duration::from_hz(1000);
-//         Timer::at(next_tick).await;
-//         last_tick = next_tick;
-//     }
-// }

@@ -1,5 +1,4 @@
 use core::fmt::Write;
-use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_rp::{peripherals::USB, usb};
 use embassy_usb::{class::cdc_acm, driver::EndpointError};
@@ -18,9 +17,6 @@ type CdcAcmClass = cdc_acm::CdcAcmClass<'static, Driver>;
 
 #[embassy_executor::task]
 async fn usb_task(driver: Driver) -> ! {
-    // SAFETY: It is safe and unavoidable for interrupt executors.
-    let spawner: Spawner = unsafe { embassy_executor::Spawner::for_current_executor().await };
-
     // Create embassy-usb Config
     let config = {
         let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
@@ -60,22 +56,22 @@ async fn usb_task(driver: Driver) -> ! {
     // Build the builder.
     let mut usb = builder.build();
 
-    join(usb.run(), serial_handler(cdc, spawner)).await;
+    join(usb.run(), serial_handler(cdc)).await;
 
     unreachable!();
 }
 
-async fn serial_handler(mut cdc: CdcAcmClass, spawner: Spawner) {
+async fn serial_handler(mut cdc: CdcAcmClass) {
     loop {
         cdc.wait_connection().await;
         defmt::info!("usb connected");
         // TODO: acquire arm lock
-        let _ = shell(&mut cdc, spawner).await;
+        let _ = shell(&mut cdc).await;
         defmt::info!("usb disconnected");
     }
 }
 
-async fn shell(cdc: &mut CdcAcmClass, spawner: Spawner) -> Result<(), EndpointError> {
+async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
     let mut buf = [0; 64];
     let mut parser = ShellParser::<32>::new();
 
@@ -92,7 +88,7 @@ async fn shell(cdc: &mut CdcAcmClass, spawner: Spawner) -> Result<(), EndpointEr
             match command {
                 Ok(Some(command)) => match command {
                     ShellCommand::Calibrate => {
-                        match imu::calibrate(spawner) {
+                        match imu::calibrate().await {
                             Ok(()) => response.write_str("calibration successful").unwrap(),
                             Err(_) => response.write_str("calibration failed").unwrap(),
                         }

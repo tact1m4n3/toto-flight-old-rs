@@ -1,17 +1,18 @@
-use core::convert::Infallible;
+use core::{
+    convert::Infallible,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use embassy_rp::{gpio, peripherals::SPI1, spi};
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
-use embassy_time::{Delay, Instant, Timer};
+use embassy_time::Delay;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice};
 use nalgebra::Vector3;
-use static_cell::StaticCell;
 
 use crate::{
-    ImuPeripherals, Irqs, SystemSpawner, black_box,
+    ImuPeripherals, Irqs, SystemSpawner,
     drivers::lsm6dsv::{self, Lsm6dsv16b},
-    mutex_cells, persistent_config,
-    utils::NalgebraVec3Ext,
+    mutex_cells, persistent_config, signals,
+    utils::{NalgebraVec3Ext, SyncWatch},
 };
 
 type Device = ExclusiveDevice<spi::Spi<'static, SPI1, spi::Async>, gpio::Output<'static>, Delay>;
@@ -20,12 +21,25 @@ type Error = lsm6dsv::Error<DeviceError<spi::Error, Infallible>>;
 
 const GRAVITY: Vector3<f32> = Vector3::new(0.0, 0.0, 9.81);
 
-mutex_cells! {
-    GYRO: Vector3<f32> = Vector3::ZERO;
-    ACCEL: Vector3<f32> = Vector3::ZERO;
+pub static GYRO: SyncWatch<Vector3<f32>> = SyncWatch::new(Vector3::ZERO);
+pub static ACCEL: SyncWatch<Vector3<f32>> = SyncWatch::new(Vector3::ZERO);
 
+mutex_cells! {
     GYRO_BIAS: Vector3<f32> = Vector3::ZERO;
     ACCEL_BIAS: Vector3<f32> = Vector3::ZERO;
+}
+
+pub fn get_gyro_bias() -> Vector3<f32> {
+    GYRO_BIAS.lock(|cell| cell.get())
+}
+
+pub fn get_accel_bias() -> Vector3<f32> {
+    ACCEL_BIAS.lock(|cell| cell.get())
+}
+
+signals! {
+    INTERRUPT_SIGNAL: ();
+    UNBIASED_IMU_FOR_CALIBRATION: (Vector3<f32>, Vector3<f32>);
 }
 
 pub async fn init(spawner: SystemSpawner, p: ImuPeripherals) -> Result<(), Error> {
@@ -41,24 +55,8 @@ pub async fn init(spawner: SystemSpawner, p: ImuPeripherals) -> Result<(), Error
     let mut imu = Lsm6dsv16b::new(spi_dev);
     imu.init().await?;
 
-    spawner
-        .realtime
-        .spawn(read_task(imu, interrupt_pin).unwrap());
-
-    Ok(())
-}
-
-pub fn calibrate(spawner: embassy_executor::Spawner) -> Result<(), CalibrationAlreadyInProgress> {
-    spawner.spawn(calibrator().map_err(|_| CalibrationAlreadyInProgress)?);
-    Ok(())
-}
-
-#[derive(defmt::Format)]
-pub struct CalibrationAlreadyInProgress;
-
-#[embassy_executor::task]
-async fn read_task(mut imu: Imu, interrupt_pin: gpio::Input<'static>) {
     // load calibration
+    // NOTE: there is a possible race condition here with the calibrate function
     let gyro_bias = persistent_config::get_gyro_bias().await.unwrap_or([0.0; 3]);
     let accel_bias = persistent_config::get_accel_bias()
         .await
@@ -68,13 +66,18 @@ async fn read_task(mut imu: Imu, interrupt_pin: gpio::Input<'static>) {
         ACCEL_BIAS.borrow(cs).set(accel_bias.into());
     });
 
-    let spawner = unsafe { embassy_executor::Spawner::for_current_executor().await };
-    static INTERRUPT_SIGNAL: StaticCell<Signal<NoopRawMutex, ()>> = StaticCell::new();
-    let interrupt_signal = INTERRUPT_SIGNAL.init(Signal::new());
-    spawner.spawn(interrupt_task(interrupt_pin, interrupt_signal).unwrap());
+    spawner.realtime.spawn(main_task(imu).unwrap());
+    spawner
+        .realtime
+        .spawn(interrupt_listener_task(interrupt_pin).unwrap());
 
+    Ok(())
+}
+
+#[embassy_executor::task]
+async fn main_task(mut imu: Imu) {
     loop {
-        interrupt_signal.wait().await;
+        INTERRUPT_SIGNAL.wait().await;
 
         let data = match imu.read().await {
             Ok(data) => data,
@@ -84,56 +87,51 @@ async fn read_task(mut imu: Imu, interrupt_pin: gpio::Input<'static>) {
             }
         };
 
+        let unbiased_gyro = Vector3::from(data.gyro);
+        let unbiased_accel = Vector3::from(data.accel);
+        UNBIASED_IMU_FOR_CALIBRATION.signal((unbiased_gyro, unbiased_accel));
+
         let (gyro_bias, accel_bias) =
             critical_section::with(|cs| (GYRO_BIAS.borrow(cs).get(), ACCEL_BIAS.borrow(cs).get()));
 
-        let gyro = Vector3::from(data.gyro) + gyro_bias;
-        let accel = Vector3::from(data.accel) + accel_bias;
+        let gyro = unbiased_gyro + gyro_bias;
+        let accel = unbiased_accel + accel_bias;
 
-        critical_section::with(|cs| {
-            GYRO.borrow(cs).set(gyro);
-            ACCEL.borrow(cs).set(accel);
-        });
-
-        let timestamp = Instant::now();
-        black_box::GYRO.signal((gyro, timestamp));
-        black_box::ACCEL.signal((accel, timestamp));
+        GYRO.set(gyro);
+        ACCEL.set(accel);
     }
 }
 
 #[embassy_executor::task]
-async fn interrupt_task(
-    mut interrupt_pin: gpio::Input<'static>,
-    interrupt_signal: &'static Signal<NoopRawMutex, ()>,
-) {
+async fn interrupt_listener_task(mut interrupt_pin: gpio::Input<'static>) {
     loop {
         interrupt_pin.wait_for_rising_edge().await;
-        interrupt_signal.signal(());
+        INTERRUPT_SIGNAL.signal(());
     }
 }
 
-#[embassy_executor::task]
-async fn calibrator() {
+pub struct CalibrationAlreadyInProgressError;
+
+pub async fn calibrate() -> Result<(), CalibrationAlreadyInProgressError> {
     const CALIBRATION_SAMPLES: usize = 1000;
+
+    static CALIBRATING: AtomicBool = AtomicBool::new(false);
+    if CALIBRATING.swap(true, Ordering::Relaxed) {
+        return Err(CalibrationAlreadyInProgressError);
+    }
 
     // TODO: acquire arm lock
 
     defmt::debug!("calibration started");
 
-    let mut accumulated_gyro: Vector3<f32> = Vector3::zeros();
-    let mut accumulated_acceleration: Vector3<f32> = Vector3::zeros();
+    let mut calibrator = Calibrator::new();
     for _ in 0..CALIBRATION_SAMPLES {
-        let (gyro, accel) =
-            critical_section::with(|cs| (GYRO.borrow(cs).get(), ACCEL.borrow(cs).get()));
-        accumulated_gyro += gyro;
-        accumulated_acceleration += accel;
-        Timer::after_millis(1).await;
+        let (gyro, accel) = UNBIASED_IMU_FOR_CALIBRATION.wait().await;
+        calibrator.add_sample(gyro, accel);
     }
+    let (gyro_bias, accel_bias) = calibrator.compute_bias();
 
-    let gyro_bias = -accumulated_gyro / CALIBRATION_SAMPLES as f32;
-    let accel_bias = -GRAVITY - accumulated_acceleration / CALIBRATION_SAMPLES as f32;
-
-    defmt::debug!("finished calibrating");
+    defmt::debug!("calibration completed");
     defmt::debug!("gyro bias: {} {} {}", gyro_bias.x, gyro_bias.y, gyro_bias.z);
     defmt::debug!(
         "accel bias: {} {} {}",
@@ -143,16 +141,40 @@ async fn calibrator() {
     );
 
     critical_section::with(|cs| {
-        // we add the new bias to the old one because the new bias is calculated based on the
-        // already biased readings
-        GYRO_BIAS
-            .borrow(cs)
-            .set(GYRO_BIAS.borrow(cs).get() + gyro_bias);
-        ACCEL_BIAS
-            .borrow(cs)
-            .set(ACCEL_BIAS.borrow(cs).get() + accel_bias);
+        GYRO_BIAS.borrow(cs).set(gyro_bias);
+        ACCEL_BIAS.borrow(cs).set(accel_bias);
     });
-
     persistent_config::set_gyro_bias(gyro_bias.into()).await;
     persistent_config::set_accel_bias(accel_bias.into()).await;
+
+    CALIBRATING.store(false, Ordering::Release);
+    Ok(())
+}
+
+struct Calibrator {
+    accumulated_gyro: Vector3<f32>,
+    accumulated_accel: Vector3<f32>,
+    samples_collected: usize,
+}
+
+impl Calibrator {
+    fn new() -> Self {
+        Self {
+            accumulated_gyro: Vector3::zeros(),
+            accumulated_accel: Vector3::zeros(),
+            samples_collected: 0,
+        }
+    }
+
+    fn add_sample(&mut self, gyro: Vector3<f32>, accel: Vector3<f32>) {
+        self.accumulated_gyro += gyro;
+        self.accumulated_accel += accel;
+        self.samples_collected += 1;
+    }
+
+    fn compute_bias(&self) -> (Vector3<f32>, Vector3<f32>) {
+        let gyro_bias = -self.accumulated_gyro / self.samples_collected as f32;
+        let accel_bias = -GRAVITY - self.accumulated_accel / self.samples_collected as f32;
+        (gyro_bias, accel_bias)
+    }
 }

@@ -7,7 +7,6 @@ use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRe
 use crate::{GpsPeripherals, Irqs, SystemSpawner, mutex_cells};
 
 mutex_cells! {
-    DATA: Option<Data> = None;
     PPS_TIMESTAMP: Option<Instant> = None;
 }
 
@@ -21,20 +20,11 @@ pub fn init(spawner: SystemSpawner, p: GpsPeripherals) {
     let pps_pin = gpio::Input::new(p.pps_pin, gpio::Pull::None);
 
     spawner.high_prio.spawn(main_task(uart).unwrap());
-    spawner.high_prio.spawn(listen_for_pps(pps_pin).unwrap());
+    spawner.high_prio.spawn(pps_listener_task(pps_pin).unwrap());
 }
 
 #[embassy_executor::task]
-pub async fn listen_for_pps(mut pps_pin: gpio::Input<'static>) {
-    loop {
-        pps_pin.wait_for_rising_edge().await;
-        let instant = Instant::now();
-        PPS_TIMESTAMP.lock(|pps_timestamp| pps_timestamp.set(Some(instant)));
-    }
-}
-
-#[embassy_executor::task]
-pub async fn main_task(mut uart_rx: uart::BufferedUartRx) {
+async fn main_task(mut uart_rx: uart::BufferedUartRx) {
     let mut measurement_delay = Duration::from_millis(80); // default measurement delay
 
     let mut buffer = [0u8; 128];
@@ -57,24 +47,25 @@ pub async fn main_task(mut uart_rx: uart::BufferedUartRx) {
                                         measurement_delay = now - pps_instant;
                                     }
 
-                                    let data = Data {
-                                        latitude: pvt.latitude(),
-                                        longitude: pvt.longitude(),
-                                        altitude: pvt.height_msl() as f32,
-                                        h_acc: pvt.horizontal_accuracy() as f32,
-                                        v_acc: pvt.vertical_accuracy() as f32,
-                                        speed: pvt.ground_speed_2d() as f32,
-                                        heading: pvt.heading_motion() as f32,
-                                        num_sat: pvt.num_satellites(),
-                                        hdop: pvt.pdop() as f32,
-                                        fix_type: pvt.fix_type().into(),
-                                        vertical_velocity: pvt.vel_down() as f32,
-                                        measurement_time: now.saturating_sub(measurement_delay),
-                                    };
+                                    let measurement_time = now.saturating_sub(measurement_delay);
 
-                                    critical_section::with(|cs| DATA.borrow(cs).set(Some(data)));
+                                    // let data = Data {
+                                    //     latitude: pvt.latitude(),
+                                    //     longitude: pvt.longitude(),
+                                    //     altitude: pvt.height_msl() as f32,
+                                    //     h_acc: pvt.horizontal_accuracy() as f32,
+                                    //     v_acc: pvt.vertical_accuracy() as f32,
+                                    //     speed: pvt.ground_speed_2d() as f32,
+                                    //     heading: pvt.heading_motion() as f32,
+                                    //     num_sat: pvt.num_satellites(),
+                                    //     hdop: pvt.pdop() as f32,
+                                    //     fix_type: pvt.fix_type().into(),
+                                    //     vertical_velocity: pvt.vel_down() as f32,
+                                    //     measurement_time: now.saturating_sub(measurement_delay),
+                                    // };
 
-                                    // TODO: log data to blackbox
+                                    // TODO: input to control
+                                    // TODO: log data to telemetry
                                 }
                                 _ => {}
                             }
@@ -89,6 +80,15 @@ pub async fn main_task(mut uart_rx: uart::BufferedUartRx) {
                 defmt::warn!("gps: failed to read uart");
             }
         };
+    }
+}
+
+#[embassy_executor::task]
+async fn pps_listener_task(mut pps_pin: gpio::Input<'static>) {
+    loop {
+        pps_pin.wait_for_rising_edge().await;
+        let instant = Instant::now();
+        critical_section::with(|cs| PPS_TIMESTAMP.borrow(cs).set(Some(instant)));
     }
 }
 
