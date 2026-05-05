@@ -8,7 +8,7 @@ use nalgebra::Vector3;
 use crate::{
     PwmOutputsPeripherals, SystemSpawner,
     nav_loop::{self, Command},
-    persistent_config,
+    persistent_config as cfg,
     sensors::imu,
     utils::{NalgebraVec3Ext, SyncWatch},
 };
@@ -87,44 +87,10 @@ struct OutputPwms {
 
 #[embassy_executor::task]
 async fn task(mut output_pwms: OutputPwms) {
-    let mixer_settings = MixerSettings {
-        left_elevon: OutputMixerSettings {
-            mid_point: 1500,
-            range: 1000..=2000,
-            gain: Vector3::new(0.5, 0.5, 0.0),
-        },
-        right_elevon: OutputMixerSettings {
-            mid_point: 1500,
-            range: 1000..=2000,
-            gain: Vector3::new(-0.5, 0.5, 0.0),
-        },
-    };
-
-    let mut rate_controller = RateController {
-        roll_controller: SingleAxisRateController::new(RatePidSettings {
-            kp: persistent_config::get_roll_rate_kp().await.unwrap_or(7.0),
-            ki: persistent_config::get_roll_rate_ki().await.unwrap_or(10.0),
-            kff: persistent_config::get_roll_rate_kff().await.unwrap_or(50.0),
-            i_term_max_error: 165.0,
-        }),
-        pitch_controller: SingleAxisRateController::new(RatePidSettings {
-            kp: persistent_config::get_pitch_rate_kp().await.unwrap_or(7.0),
-            ki: persistent_config::get_pitch_rate_ki().await.unwrap_or(10.0),
-            kff: persistent_config::get_pitch_rate_kff()
-                .await
-                .unwrap_or(90.0),
-            i_term_max_error: 165.0,
-        }),
-        yaw_controller: SingleAxisRateController::new(RatePidSettings {
-            kp: persistent_config::get_yaw_rate_kp().await.unwrap_or(0.0),
-            ki: persistent_config::get_yaw_rate_ki().await.unwrap_or(0.0),
-            kff: persistent_config::get_yaw_rate_kff().await.unwrap_or(0.0),
-            i_term_max_error: 165.0,
-        }),
-    };
+    let mixer_settings = MixerSettings::load().await;
+    let mut rate_controller = RateController::new().await;
 
     let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
-
     loop {
         ticker.next().await;
 
@@ -211,6 +177,37 @@ struct MixerSettings {
     right_elevon: OutputMixerSettings,
 }
 
+impl MixerSettings {
+    async fn load() -> Self {
+        let left_elevon_mid_point = cfg::get_left_elevon_mid_point().await.unwrap_or(1500);
+        let left_elevon_min_us = cfg::get_left_elevon_min_us().await.unwrap_or(1000);
+        let left_elevon_max_us = cfg::get_left_elevon_max_us().await.unwrap_or(2000);
+        let left_elevon_gain = cfg::get_left_elevon_mixer_gain()
+            .await
+            .unwrap_or([0.5, 0.5, 0.0]);
+
+        let right_elevon_mid_point = cfg::get_right_elevon_mid_point().await.unwrap_or(1500);
+        let right_elevon_min_us = cfg::get_right_elevon_min_us().await.unwrap_or(1000);
+        let right_elevon_max_us = cfg::get_right_elevon_max_us().await.unwrap_or(2000);
+        let right_elevon_gain = cfg::get_right_elevon_mixer_gain()
+            .await
+            .unwrap_or([0.5, -0.5, 0.0]);
+
+        Self {
+            left_elevon: OutputMixerSettings {
+                mid_point: left_elevon_mid_point,
+                range: left_elevon_min_us..=left_elevon_max_us,
+                gain: left_elevon_gain.into(),
+            },
+            right_elevon: OutputMixerSettings {
+                mid_point: right_elevon_mid_point,
+                range: right_elevon_min_us..=right_elevon_max_us,
+                gain: right_elevon_gain.into(),
+            },
+        }
+    }
+}
+
 struct OutputMixerSettings {
     mid_point: i16,
     range: RangeInclusive<i16>,
@@ -221,7 +218,6 @@ struct RatePidSettings {
     kff: f32,
     kp: f32,
     ki: f32,
-    i_term_max_error: f32,
 }
 
 struct SingleAxisRateController {
@@ -242,7 +238,9 @@ impl SingleAxisRateController {
 
         let ff_term = self.settings.kff * target_rate;
         let p_term = self.settings.kp * error;
-        if error.abs() <= self.settings.i_term_max_error {
+
+        const I_TERM_MAX_ERROR: f32 = 165.0;
+        if error.abs() <= I_TERM_MAX_ERROR {
             self.i_term += self.settings.ki * error * dt;
         }
 
@@ -257,6 +255,26 @@ struct RateController {
 }
 
 impl RateController {
+    async fn new() -> Self {
+        Self {
+            roll_controller: SingleAxisRateController::new(RatePidSettings {
+                kp: cfg::get_roll_rate_kp().await.unwrap_or(7.0),
+                ki: cfg::get_roll_rate_ki().await.unwrap_or(10.0),
+                kff: cfg::get_roll_rate_kff().await.unwrap_or(50.0),
+            }),
+            pitch_controller: SingleAxisRateController::new(RatePidSettings {
+                kp: cfg::get_pitch_rate_kp().await.unwrap_or(7.0),
+                ki: cfg::get_pitch_rate_ki().await.unwrap_or(10.0),
+                kff: cfg::get_pitch_rate_kff().await.unwrap_or(90.0),
+            }),
+            yaw_controller: SingleAxisRateController::new(RatePidSettings {
+                kp: cfg::get_yaw_rate_kp().await.unwrap_or(0.0),
+                ki: cfg::get_yaw_rate_ki().await.unwrap_or(0.0),
+                kff: cfg::get_yaw_rate_kff().await.unwrap_or(0.0),
+            }),
+        }
+    }
+
     fn update(
         &mut self,
         target_rate: Vector3<f32>,

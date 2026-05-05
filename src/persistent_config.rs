@@ -87,6 +87,15 @@ impl_get_set!(yaw_rate_kp, Key::YawRateKp, f32);
 impl_get_set!(yaw_rate_ki, Key::YawRateKi, f32);
 impl_get_set!(yaw_rate_kff, Key::YawRateKff, f32);
 
+impl_get_set!(left_elevon_mid_point, Key::LeftElevonMidPoint, i16);
+impl_get_set!(left_elevon_min_us, Key::LeftElevonMinUs, i16);
+impl_get_set!(left_elevon_max_us, Key::LeftElevonMaxUs, i16);
+impl_get_set!(left_elevon_mixer_gain, Key::LeftElevonMixerGain, [f32; 3]);
+impl_get_set!(right_elevon_mid_point, Key::RightElevonMidPoint, i16);
+impl_get_set!(right_elevon_min_us, Key::RightElevonMinUs, i16);
+impl_get_set!(right_elevon_max_us, Key::RightElevonMaxUs, i16);
+impl_get_set!(right_elevon_mixer_gain, Key::RightElevonMixerGain, [f32; 3]);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Key {
@@ -103,6 +112,15 @@ pub enum Key {
     YawRateKp = 9,
     YawRateKi = 10,
     YawRateKff = 11,
+
+    LeftElevonMidPoint = 12,
+    LeftElevonMinUs = 13,
+    LeftElevonMaxUs = 14,
+    LeftElevonMixerGain = 15,
+    RightElevonMidPoint = 16,
+    RightElevonMinUs = 17,
+    RightElevonMaxUs = 18,
+    RightElevonMixerGain = 19,
 }
 
 impl TryFrom<u8> for Key {
