@@ -28,50 +28,64 @@ pub async fn init(p: FlashPeripherals) {
 }
 
 macro_rules! impl_get_set {
-    ($get_name:ident, $set_name:ident, $key:expr, $typ:ty) => {
+    ($name:ident, $key:expr, $typ:ty) => {
         const _: Key = $key; // assert key type
 
-        #[allow(unused)]
-        pub async fn $get_name() -> Option<$typ> {
-            let mut storage = STORAGE.lock().await;
-            let Some(storage) = storage.as_mut() else {
-                return None;
-            };
-            const SIZE: usize = (core::mem::size_of::<Key>() + core::mem::size_of::<$typ>()) + FLASH_WORD_SIZE;
-            let mut data_buffer: [u8; SIZE] = [0; SIZE];
-            match storage.fetch_item::<$typ>(&mut data_buffer, &$key).await {
-                Ok(value) => value,
-                Err(err) => {
-                    defmt::warn!("failed to read config: {}", err);
-                    None
+        paste::paste! {
+            #[allow(unused)]
+            pub async fn [<get_ $name>]() -> Option<$typ> {
+                let mut storage = STORAGE.lock().await;
+                let Some(storage) = storage.as_mut() else {
+                    return None;
+                };
+                const SIZE: usize =
+                    (core::mem::size_of::<Key>() + core::mem::size_of::<$typ>()) + FLASH_WORD_SIZE;
+                let mut data_buffer: [u8; SIZE] = [0; SIZE];
+                match storage.fetch_item::<$typ>(&mut data_buffer, &$key).await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        defmt::warn!("failed to read config: {}", err);
+                        None
+                    }
                 }
             }
-        }
 
-        #[allow(unused)]
-        pub async fn $set_name(value: $typ) {
-            let mut storage = STORAGE.lock().await;
-            let Some(storage) = storage.as_mut() else {
-                return;
-            };
-            const SIZE: usize = core::mem::size_of::<Key>() + core::mem::size_of::<$typ>() + FLASH_WORD_SIZE;
-            let mut data_buffer: [u8; SIZE] = [0; SIZE];
-            match storage
-                .store_item::<$typ>(&mut data_buffer, &$key, &value)
-                .await
-            {
-                Ok(()) => (),
-                Err(err) => {
-                    defmt::warn!("failed to write config: {}", err);
+            #[allow(unused)]
+            pub async fn [<set_ $name>](value: $typ) {
+                let mut storage = STORAGE.lock().await;
+                let Some(storage) = storage.as_mut() else {
+                    return;
+                };
+                const SIZE: usize =
+                    core::mem::size_of::<Key>() + core::mem::size_of::<$typ>() + FLASH_WORD_SIZE;
+                let mut data_buffer: [u8; SIZE] = [0; SIZE];
+                match storage
+                    .store_item::<$typ>(&mut data_buffer, &$key, &value)
+                    .await
+                {
+                    Ok(()) => (),
+                    Err(err) => {
+                        defmt::warn!("failed to write config: {}", err);
+                    }
                 }
             }
         }
     };
 }
 
-impl_get_set!(get_craft_name, set_craft_name, Key::CraftName, [u8; 16]);
-impl_get_set!(get_gyro_bias, set_gyro_bias, Key::GyroBias, [f32; 3]);
-impl_get_set!(get_accel_bias, set_accel_bias, Key::AccelBias, [f32; 3]);
+impl_get_set!(craft_name, Key::CraftName, [u8; 16]);
+impl_get_set!(gyro_bias, Key::GyroBias, [f32; 3]);
+impl_get_set!(accel_bias, Key::AccelBias, [f32; 3]);
+
+impl_get_set!(roll_rate_kp, Key::RollRateKp, f32);
+impl_get_set!(roll_rate_ki, Key::RollRateKi, f32);
+impl_get_set!(roll_rate_kff, Key::RollRateKff, f32);
+impl_get_set!(pitch_rate_kp, Key::PitchRateKp, f32);
+impl_get_set!(pitch_rate_ki, Key::PitchRateKi, f32);
+impl_get_set!(pitch_rate_kff, Key::PitchRateKff, f32);
+impl_get_set!(yaw_rate_kp, Key::YawRateKp, f32);
+impl_get_set!(yaw_rate_ki, Key::YawRateKi, f32);
+impl_get_set!(yaw_rate_kff, Key::YawRateKff, f32);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -79,6 +93,16 @@ pub enum Key {
     CraftName = 0,
     GyroBias = 1,
     AccelBias = 2,
+
+    RollRateKp = 3,
+    RollRateKi = 4,
+    RollRateKff = 5,
+    PitchRateKp = 6,
+    PitchRateKi = 7,
+    PitchRateKff = 8,
+    YawRateKp = 9,
+    YawRateKi = 10,
+    YawRateKff = 11,
 }
 
 impl TryFrom<u8> for Key {

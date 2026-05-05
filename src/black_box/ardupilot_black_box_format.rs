@@ -139,10 +139,19 @@ impl<W: embedded_io_async::Write> Logger<W> {
 
         // self.write_fmt(
         //     TYPE_MOTOR_OUTPUT,
-        //     size_of::<RcouMsg>() as u8,
-        //     "RCOU",
-        //     "QHHHHHHHHHHHHHH",
-        //     "TimeUS,C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,C14",
+        //     size_of::<MotorOutputMsg>() as u8,
+        //     "MOT",
+        //     "QHHH",
+        //     "TimeUS,Throttle,LeftElev,RightElev",
+        // )
+        // .await?;
+        //
+        // self.write_fmt(
+        //     TYPE_NAV_TARGET,
+        //     size_of::<NavTargetMsg>() as u8,
+        //     "TAR",
+        //     "Qffff",
+        //     "TimeUS,Throttle,RateRoll,RatePitch,RateYaw",
         // )
         // .await?;
 
@@ -254,43 +263,25 @@ impl<W: embedded_io_async::Write> Logger<W> {
         })
         .await?;
 
-        self.write_fmt(
-            TYPE_MOTOR_OUTPUT,
-            size_of::<MotorOutputMsg>() as u8,
-            "MOT",
-            "QHHH",
-            "TimeUS,Throttle,LeftElev,RightElev",
-        )
-        .await?;
-
-        self.write_fmt(
-            TYPE_NAV_TARGET,
-            size_of::<NavTargetMsg>() as u8,
-            "TAR",
-            "Qffff",
-            "TimeUS,Throttle,RateRoll,RatePitch,RateYaw",
-        )
-        .await?;
-
-        self.write(&FmtuMsg {
-            sync: SYNC,
-            type_: TYPE_FMTU,
-            time_us: U64::new(t),
-            fmt_type: TYPE_MOTOR_OUTPUT,
-            units: pack("s---"),
-            mults: pack("F---"),
-        })
-        .await?;
-
-        self.write(&FmtuMsg {
-            sync: SYNC,
-            type_: TYPE_FMTU,
-            time_us: U64::new(t),
-            fmt_type: TYPE_NAV_TARGET,
-            units: pack("s-rrr"),
-            mults: pack("F-000"),
-        })
-        .await?;
+        // self.write(&FmtuMsg {
+        //     sync: SYNC,
+        //     type_: TYPE_FMTU,
+        //     time_us: U64::new(t),
+        //     fmt_type: TYPE_MOTOR_OUTPUT,
+        //     units: pack("s---"),
+        //     mults: pack("F---"),
+        // })
+        // .await?;
+        //
+        // self.write(&FmtuMsg {
+        //     sync: SYNC,
+        //     type_: TYPE_FMTU,
+        //     time_us: U64::new(t),
+        //     fmt_type: TYPE_NAV_TARGET,
+        //     units: pack("s-rrr"),
+        //     mults: pack("F-000"),
+        // })
+        // .await?;
 
         self.write(&MsgMsg {
             sync: SYNC,
@@ -433,57 +424,57 @@ impl<W: embedded_io_async::Write> Logger<W> {
         .await
     }
 
-    pub async fn write_motor_output(
-        &mut self,
-        time_us: u64,
-        throttle: u16,
-        left_elevon: u16,
-        right_elevon: u16,
-    ) -> Result<(), W::Error> {
-        self.write(&MotorOutputMsg {
-            sync: SYNC,
-            type_: TYPE_MOTOR_OUTPUT,
-            time_us: U64::new(time_us),
-            throttle: U16::new(throttle),
-            left_elevon: U16::new(left_elevon),
-            right_elevon: U16::new(right_elevon),
-        })
-        .await
-    }
-
-    pub async fn write_nav_target(
-        &mut self,
-        time_us: u64,
-        throttle: f32,
-        rate: (f32, f32, f32),
-    ) -> Result<(), W::Error> {
-        self.write(&NavTargetMsg {
-            sync: SYNC,
-            type_: TYPE_NAV_TARGET,
-            time_us: U64::new(time_us),
-            throttle: F32::new(throttle),
-            rate_roll: F32::new(rate.0),
-            rate_pitch: F32::new(rate.1),
-            rate_yaw: F32::new(rate.2),
-        })
-        .await
-    }
-
-    pub async fn write_parm(
-        &mut self,
-        time_us: u64,
-        name: &str,
-        value: f64,
-    ) -> Result<(), W::Error> {
-        self.write(&ParmMsg {
-            sync: SYNC,
-            type_: TYPE_PARM,
-            time_us: U64::new(time_us),
-            name: pack(name),
-            value: value.to_le_bytes(),
-        })
-        .await
-    }
+    // pub async fn write_motor_output(
+    //     &mut self,
+    //     time_us: u64,
+    //     throttle: u16,
+    //     left_elevon: u16,
+    //     right_elevon: u16,
+    // ) -> Result<(), W::Error> {
+    //     self.write(&MotorOutputMsg {
+    //         sync: SYNC,
+    //         type_: TYPE_MOTOR_OUTPUT,
+    //         time_us: U64::new(time_us),
+    //         throttle: U16::new(throttle),
+    //         left_elevon: U16::new(left_elevon),
+    //         right_elevon: U16::new(right_elevon),
+    //     })
+    //     .await
+    // }
+    //
+    // pub async fn write_nav_target(
+    //     &mut self,
+    //     time_us: u64,
+    //     throttle: f32,
+    //     rate: (f32, f32, f32),
+    // ) -> Result<(), W::Error> {
+    //     self.write(&NavTargetMsg {
+    //         sync: SYNC,
+    //         type_: TYPE_NAV_TARGET,
+    //         time_us: U64::new(time_us),
+    //         throttle: F32::new(throttle),
+    //         rate_roll: F32::new(rate.0),
+    //         rate_pitch: F32::new(rate.1),
+    //         rate_yaw: F32::new(rate.2),
+    //     })
+    //     .await
+    // }
+    //
+    // pub async fn write_parm(
+    //     &mut self,
+    //     time_us: u64,
+    //     name: &str,
+    //     value: f64,
+    // ) -> Result<(), W::Error> {
+    //     self.write(&ParmMsg {
+    //         sync: SYNC,
+    //         type_: TYPE_PARM,
+    //         time_us: U64::new(time_us),
+    //         name: pack(name),
+    //         value: value.to_le_bytes(),
+    //     })
+    //     .await
+    // }
 }
 
 const SYNC: [u8; 2] = [0xA3, 0x95];
@@ -503,9 +494,9 @@ const TYPE_GPS: u8 = 0x03;
 const TYPE_BATTERY: u8 = 0x04;
 const TYPE_RC_CHANNELS: u8 = 0x05;
 const TYPE_RC_LINK_STATS: u8 = 0x06;
-const TYPE_FLIGHT_STATE: u8 = 0x08;
-const TYPE_MOTOR_OUTPUT: u8 = 0x09;
-const TYPE_NAV_TARGET: u8 = 0x0A;
+// const TYPE_FLIGHT_STATE: u8 = 0x07;
+// const TYPE_NAV_TARGET: u8 = 0x08;
+// const TYPE_MOTOR_OUTPUT: u8 = 0x09;
 
 // Messages: every message starts with: sync[2] + type[1].
 
@@ -656,34 +647,25 @@ struct RcLinkStatsMsg {
     downlink_rssi: u8,
 }
 
-#[derive(IntoBytes, KnownLayout, Immutable)]
-#[repr(C, packed)]
-struct MotorOutputMsg {
-    sync: [u8; 2],
-    type_: u8,
-    time_us: U64<LE>,
-    throttle: U16<LE>,
-    left_elevon: U16<LE>,
-    right_elevon: U16<LE>,
-}
-
-#[derive(IntoBytes, KnownLayout, Immutable)]
-#[repr(C, packed)]
-struct NavTargetMsg {
-    sync: [u8; 2],
-    type_: u8,
-    time_us: U64<LE>,
-    throttle: F32<LE>,
-    rate_roll: F32<LE>,
-    rate_pitch: F32<LE>,
-    rate_yaw: F32<LE>,
-}
-
 // #[derive(IntoBytes, KnownLayout, Immutable)]
 // #[repr(C, packed)]
-// struct RcouMsg {
+// struct MotorOutputMsg {
 //     sync: [u8; 2],
 //     type_: u8,
 //     time_us: U64<LE>,
-//     chan: [U16<LE>; 14],
+//     throttle: U16<LE>,
+//     left_elevon: U16<LE>,
+//     right_elevon: U16<LE>,
+// }
+
+// #[derive(IntoBytes, KnownLayout, Immutable)]
+// #[repr(C, packed)]
+// struct NavTargetMsg {
+//     sync: [u8; 2],
+//     type_: u8,
+//     time_us: U64<LE>,
+//     throttle: F32<LE>,
+//     rate_roll: F32<LE>,
+//     rate_pitch: F32<LE>,
+//     rate_yaw: F32<LE>,
 // }

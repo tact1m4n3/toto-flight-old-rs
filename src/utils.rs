@@ -1,9 +1,6 @@
 use core::{cell::RefCell, ops::Range};
 
-use embassy_sync::blocking_mutex::{
-    Mutex,
-    raw::{CriticalSectionRawMutex, RawMutex},
-};
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
 
@@ -146,7 +143,9 @@ impl<'a, T: Copy> SyncWatchReader<'a, T> {
     pub fn get_if_changed(&mut self) -> Option<(T, Instant)> {
         self.state.lock(|state| {
             let state = state.borrow();
-            if let Some(last_read_timestamp) = self.last_read_timestamp && state.update_timestamp <= last_read_timestamp {
+            if let Some(last_read_timestamp) = self.last_read_timestamp
+                && state.update_timestamp <= last_read_timestamp
+            {
                 return None;
             }
             self.last_read_timestamp = Some(state.update_timestamp);

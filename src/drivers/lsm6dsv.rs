@@ -1,8 +1,7 @@
 //! LSM6DSV IMU driver
 //! Ported from Betaflight's accgyro_spi_lsm6dsv16x.c
 //!
-//! Generic over embedded-hal-async SPI + CS pin.
-//! Accel and gyro are read in a single 12-byte SPI transaction (6 gyro + 6 accel).
+//! Generic over embedded-hal-async SpiDevice.
 //! ODR: High-Accuracy mode 1 @ 1000 Hz for both sensors.
 //! Full scale: ±2000 dps gyro, ±16 g accel.
 
@@ -38,19 +37,13 @@ impl<SPI, const WHO_AM_I_REG: u8> Lsm6dsv<SPI, WHO_AM_I_REG>
 where
     SPI: SpiDevice,
 {
-    /// Create a new driver instance wrapping an `SpiDevice`.
-    ///
-    /// `SpiDevice` handles CS assertion internally (use `embedded-hal-bus`
-    /// `ExclusiveDevice` or similar to wrap a raw SPI + CS pin).
-    pub fn new(spi: SPI) -> Self {
-        Self { spi }
+    pub async fn new(spi: SPI) -> Result<Self, Error<SPI::Error>> {
+        let mut this = Self { spi };
+        this.init().await?;
+        Ok(this)
     }
 
-    /// Initialise the sensor.
-    ///
-    /// Call once after power-on. The caller must wait for the INT1 rising edge
-    /// before calling `read()`.
-    pub async fn init(&mut self) -> Result<(), Error<SPI::Error>> {
+    async fn init(&mut self) -> Result<(), Error<SPI::Error>> {
         // 1. Verify device identity
         let whoami = self.read_reg(WHO_AM_I).await?;
         if whoami != WHO_AM_I_REG {
@@ -108,16 +101,6 @@ where
         Ok(())
     }
 
-    /// Read gyro + accel in a single 13-byte SPI transaction.
-    ///
-    /// Registers are contiguous: OUTX_L_G (0x22) … OUTZ_H_A (0x2D).
-    /// That is 12 data bytes = 3×i16 gyro + 3×i16 accel.
-    ///
-    /// Call this after the INT1 rising edge has been detected.
-    ///
-    /// Raw integer values are converted using the datasheet scale factors:
-    ///   - Gyro:  70 mdps/LSB  → degrees/s
-    ///   - Accel: 0.488 mg/LSB → g
     pub async fn read(&mut self) -> Result<ImuData, Error<SPI::Error>> {
         // 1 address byte + 12 data bytes
         let mut buf = [0u8; 13];

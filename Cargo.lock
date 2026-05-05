@@ -2053,6 +2053,7 @@ dependencies = [
  "libm",
  "nalgebra",
  "panic-probe",
+ "paste",
  "sdspi",
  "sequential-storage",
  "static_cell",

@@ -9,10 +9,7 @@ use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice};
 use nalgebra::Vector3;
 
 use crate::{
-    ImuPeripherals, Irqs, SystemSpawner,
-    drivers::lsm6dsv::{self, Lsm6dsv16b},
-    mutex_cells, persistent_config, signals,
-    utils::{NalgebraVec3Ext, SyncWatch},
+    ImuPeripherals, Irqs, SystemSpawner, drivers::lsm6dsv::{self, Lsm6dsv16b}, mutex_cells, nav_loop::ArmBlocker, persistent_config, signals, utils::{NalgebraVec3Ext, SyncWatch}
 };
 
 type Device = ExclusiveDevice<spi::Spi<'static, SPI1, spi::Async>, gpio::Output<'static>, Delay>;
@@ -52,8 +49,7 @@ pub async fn init(spawner: SystemSpawner, p: ImuPeripherals) -> Result<(), Error
     let spi_dev = ExclusiveDevice::new(spi, spi_cs, Delay).unwrap(); // NOTE: can't fail
     let interrupt_pin = gpio::Input::new(p.int_pin, gpio::Pull::None);
 
-    let mut imu = Lsm6dsv16b::new(spi_dev);
-    imu.init().await?;
+    let imu = Lsm6dsv16b::new(spi_dev).await?;
 
     // load calibration
     // NOTE: there is a possible race condition here with the calibrate function
@@ -120,7 +116,7 @@ pub async fn calibrate() -> Result<(), CalibrationAlreadyInProgressError> {
         return Err(CalibrationAlreadyInProgressError);
     }
 
-    // TODO: acquire arm lock
+    let _blocker = ArmBlocker::new();
 
     defmt::debug!("calibration started");
 

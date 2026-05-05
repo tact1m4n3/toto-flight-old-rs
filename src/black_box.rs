@@ -75,7 +75,7 @@ pub async fn init(spawner: SystemSpawner, p: SdCardPeripherals) -> Result<()> {
 
     // up the frequency after initialization
     let mut config = spi::Config::default();
-    config.frequency = 20_000_000;
+    config.frequency = 12_000_000;
     sd_card.spi().bus_mut().set_config(&config);
 
     let fs = FileSystem::new(BufStream::new(sd_card), FsOptions::new()).await?;
@@ -142,23 +142,13 @@ async fn log_loop(file: File<'_>) -> Result<()> {
 
     defmt::debug!("beginning new log file");
 
-    let t = embassy_time::Instant::now().as_micros();
-    let gyro_bias = imu::get_gyro_bias();
-    let accel_bias = imu::get_accel_bias();
-    l.write_parm(t, "GYRO_BIAS_X", gyro_bias.x as f64).await?;
-    l.write_parm(t, "GYRO_BIAS_Y", gyro_bias.y as f64).await?;
-    l.write_parm(t, "GYRO_BIAS_Z", gyro_bias.z as f64).await?;
-    l.write_parm(t, "ACCEL_BIAS_X", accel_bias.x as f64).await?;
-    l.write_parm(t, "ACCEL_BIAS_Y", accel_bias.y as f64).await?;
-    l.write_parm(t, "ACCEL_BIAS_Z", accel_bias.z as f64).await?;
-
     let mut gyro_watcher = imu::GYRO.watcher();
     let mut accel_watcher = imu::ACCEL.watcher();
-    let mut motor_watcher = pid_loop::MOTOR_OUTPUT.watcher();
-    let mut target_watcher = nav_loop::TARGET.watcher();
+    let mut multimeter_watcher = crate::sensors::multimeter::DATA.watcher();
     let mut channels_watcher = receiver::CHANNELS.watcher();
     let mut link_stats_watcher = receiver::LINK_STATS.watcher();
-    let mut multimeter_watcher = crate::sensors::multimeter::DATA.watcher();
+    // let mut motor_watcher = pid_loop::MOTOR_OUTPUT.watcher();
+    // let mut target_watcher = nav_loop::TARGET.watcher();
 
     let mut ticker = Ticker::every(Duration::from_hz(LOG_RATE_HZ));
     loop {
@@ -179,35 +169,11 @@ async fn log_loop(file: File<'_>) -> Result<()> {
             l.write_accel(timestamp.as_micros(), accel).await?;
         }
 
-        if let Some((motor, _timestamp)) = motor_watcher.get_if_changed()
-            && are_we_recording()
-        {
-            l.write_motor_output(
-                embassy_time::Instant::now().as_micros(),
-                motor.throttle,
-                motor.left_elevon,
-                motor.right_elevon,
-            )
-            .await?;
-        }
-
-        if let Some((target, _timestamp)) = target_watcher.get_if_changed()
-            && are_we_recording()
-        {
-            if let Some(t) = target {
-                l.write_nav_target(
-                    embassy_time::Instant::now().as_micros(),
-                    t.throttle,
-                    (t.rate.x, t.rate.y, t.rate.z),
-                )
-                .await?;
-            }
-        }
-
         if let Some((channels, timestamp)) = channels_watcher.get_if_changed()
             && are_we_recording()
         {
-            l.write_rc_channels(timestamp.as_micros(), &channels).await?;
+            l.write_rc_channels(timestamp.as_micros(), &channels)
+                .await?;
         }
 
         if let Some((stats, timestamp)) = link_stats_watcher.get_if_changed()
@@ -226,9 +192,39 @@ async fn log_loop(file: File<'_>) -> Result<()> {
         if let Some((data, timestamp)) = multimeter_watcher.get_if_changed()
             && are_we_recording()
         {
-            l.write_bat(timestamp.as_micros(), data.voltage, data.current, data.total_current)
-                .await?;
+            l.write_bat(
+                timestamp.as_micros(),
+                data.voltage,
+                data.current,
+                data.total_current,
+            )
+            .await?;
         }
+
+        // if let Some((motor, _timestamp)) = motor_watcher.get_if_changed()
+        //     && are_we_recording()
+        // {
+        //     l.write_motor_output(
+        //         embassy_time::Instant::now().as_micros(),
+        //         motor.throttle,
+        //         motor.left_elevon,
+        //         motor.right_elevon,
+        //     )
+        //     .await?;
+        // }
+        //
+        // if let Some((target, _timestamp)) = target_watcher.get_if_changed()
+        //     && are_we_recording()
+        // {
+        //     if let Some(t) = target {
+        //         l.write_nav_target(
+        //             embassy_time::Instant::now().as_micros(),
+        //             t.throttle,
+        //             (t.rate.x, t.rate.y, t.rate.z),
+        //         )
+        //         .await?;
+        //     }
+        // }
 
         l.writer.flush().await?;
     }

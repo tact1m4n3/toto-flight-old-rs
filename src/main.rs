@@ -92,16 +92,17 @@ fn main() -> ! {
     let r = split_resources!(p);
 
     interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P3); // realtime
-    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P2); // high
+    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P1); // high
     interrupt::SWI_IRQ_2.set_priority(interrupt::Priority::P0); // low
 
     interrupt::TIMER0_IRQ_0.set_priority(interrupt::Priority::P3);
     interrupt::DMA_IRQ_0.set_priority(interrupt::Priority::P3);
     interrupt::IO_IRQ_BANK0.set_priority(interrupt::Priority::P3);
 
-    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P2);
-    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P2);
-    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P0);
+    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P1);
 
     let spawner = SystemSpawner {
         realtime: REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0),
