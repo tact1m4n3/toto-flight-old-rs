@@ -1,8 +1,10 @@
 use embassy_rp::uart;
-use embedded_io_async::Read;
+use embassy_time::{Duration, Ticker};
+use embedded_io_async::{Read, Write};
 use static_cell::StaticCell;
+use crsf::Payload;
 
-use crate::{Irqs, ReceiverPeripherals, utils::SyncWatch};
+use crate::{Irqs, ReceiverPeripherals, sensors::multimeter, utils::SyncWatch};
 
 pub static CHANNELS: SyncWatch<[u16; 16]> = SyncWatch::new([1500; 16]);
 pub static LINK_STATS: SyncWatch<LinkStats> = SyncWatch::new(LinkStats {
@@ -87,8 +89,31 @@ async fn packet_receiver(mut uart_rx: uart::BufferedUartRx) {
     }
 }
 
+const TELEMETRY_FREQ_HZ: u64 = 10;
+
 #[embassy_executor::task]
-async fn telemetry_sender(uart_tx: uart::BufferedUartTx) {}
+async fn telemetry_sender(mut uart_tx: uart::BufferedUartTx) {
+    let mut multimeter_watcher = multimeter::DATA.watcher();
+
+    let mut ticker = Ticker::every(Duration::from_hz(TELEMETRY_FREQ_HZ));
+    loop {
+        ticker.next().await;
+
+        let mut buf: [u8; crsf::MAX_PACKET_LEN] = [0; crsf::MAX_PACKET_LEN];
+        if let Some((data, _)) = multimeter_watcher.get_if_changed() {
+            let mut packet = crsf::BatterySensor::new();
+            packet.set_voltage((data.voltage * 1e5) as u16); // convert from V to 10uV unit
+            packet.set_current((data.current * 1e5) as u16); // convert from A to 10uA unit
+            packet.set_capacity_used(data.capacity_used as u32); // already in mAh
+            packet.set_remaining(0); // we don't have this info
+
+            packet.encode(&mut buf);
+            if let Err(_) = uart_tx.write(&buf[..packet.len()]).await {
+                defmt::warn!("failed to write to uart");
+            }
+        }
+    }
+}
 
 fn crsf_read_raw_rc(raw: u16) -> u16 {
     debug_assert!(raw >= crsf::RcChannelsPacked::CHANNEL_VALUE_MIN);

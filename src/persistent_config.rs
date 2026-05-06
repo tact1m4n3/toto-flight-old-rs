@@ -44,7 +44,7 @@ macro_rules! impl_get_set {
                 match storage.fetch_item::<$typ>(&mut data_buffer, &$key).await {
                     Ok(value) => value,
                     Err(err) => {
-                        defmt::warn!("failed to read config: {}", err);
+                        defmt::warn!("failed to read config for {}: {}", stringify!($name), err);
                         None
                     }
                 }
@@ -65,7 +65,7 @@ macro_rules! impl_get_set {
                 {
                     Ok(()) => (),
                     Err(err) => {
-                        defmt::warn!("failed to write config: {}", err);
+                        defmt::warn!("failed to write config for {}: {}", stringify!($name), err);
                     }
                 }
             }

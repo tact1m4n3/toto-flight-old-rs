@@ -9,7 +9,7 @@ const MAX_CURRENT: f64 = 50.0;
 pub static DATA: SyncWatch<Data> = SyncWatch::new(Data {
     voltage: 0.0,
     current: 0.0,
-    total_current: 0.0,
+    capacity_used: 0.0,
 });
 
 #[derive(Clone, Copy)]
@@ -19,7 +19,7 @@ pub struct Data {
     /// in A
     pub current: f32,
     /// in mAh
-    pub total_current: f32,
+    pub capacity_used: f32,
 }
 
 // TODO: Maybe we should use f32 instead of f64 (the driver uses this).
@@ -75,7 +75,7 @@ async fn task(mut ina226: INA226<SharedI2cDevice, ina226_tp::Operational>) {
         DATA.set(Data {
             voltage: instant_voltage as f32,
             current: instant_current as f32,
-            total_current: total_current as f32,
+            capacity_used: total_current as f32,
         });
     }
 }

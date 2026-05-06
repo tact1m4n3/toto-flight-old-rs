@@ -193,7 +193,7 @@ async fn log_loop(file: File<'_>) -> Result<()> {
                 timestamp.as_micros(),
                 data.voltage,
                 data.current,
-                data.total_current,
+                data.capacity_used,
             )
             .await?;
         }
