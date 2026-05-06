@@ -13,7 +13,9 @@ embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-hal-nb = "1.0.0"
+embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
+embedded-sdmmc = { version = "0.9.0", default-features = false, features = ["defmt-log"] }
 
 embassy-executor = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
 embassy-rp = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["critical-section-impl", "defmt", "rp235xb", "time-driver", "unstable-pac"] }
@@ -49,14 +51,12 @@ ahrs = { version = "0.8.0", default-features = false }
 
 ina226-tp = { version = "0.4.1", features = ["async"] }
 
-block-device-adapters = { version = "0.2.0", git = "https://github.com/MabezDev/embedded-fatfs", features = ["defmt"] }
-aligned = "0.4.3"
-sdspi = { version = "0.1.0", git = "https://github.com/MabezDev/embedded-fatfs", features = ["defmt"] }
-embedded-fatfs = { version = "0.1.0", git = "https://github.com/MabezDev/embedded-fatfs", default-features = false, features = ["defmt", "lfn"] }
-
 zerocopy = { version = "0.8.48", features = ["derive"] }
 sequential-storage = { version = "7.2.0", default-features = false, features = ["defmt"] }
 paste = "1.0.15"
+
+[patch.crates-io]
+embedded-sdmmc = { path = "../embedded-sdmmc-rs/" }
 
 [profile.dev]
 codegen-units = 1

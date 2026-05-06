@@ -5,14 +5,14 @@
 #![feature(str_split_whitespace_remainder)]
 
 mod black_box;
-mod nav_loop;
 mod drivers;
+mod nav_loop;
 mod persistent_config;
+mod pid_loop;
 mod receiver;
 mod sensors;
 mod usb_interface;
 mod utils;
-mod pid_loop;
 
 use assign_resources::assign_resources;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -137,9 +137,13 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
 
     usb_interface::init(spawner, r.usb);
 
-    if let Err(err) = black_box::init(spawner, r.sd_card).await {
-        defmt::warn!("failed to initialize black box logging: {}", err);
-    }
+    let mut maybe_storage = match black_box::Storage::new(r.sd_card) {
+        Ok(storage) => Some(storage),
+        Err(err) => {
+            defmt::warn!("failed to initialize black box logging: {}", err);
+            None
+        }
+    };
 
     let mut last = Instant::now();
     let mut idle_ticks: u64 = 0;
@@ -147,7 +151,18 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
     let mut idle_led = gpio::Output::new(r.led.pin, gpio::Level::Low);
     loop {
         let before = Instant::now();
+
+        if let Some(mut storage) = maybe_storage.take() {
+            match storage.poll() {
+                Ok(()) => maybe_storage = Some(storage),
+                Err(err) => {
+                    defmt::warn!("black box logging error: {}", err);
+                }
+            }
+        }
+
         cortex_m::asm::wfe();
+
         idle_ticks += (Instant::now() - before).as_micros();
 
         let now = Instant::now();
