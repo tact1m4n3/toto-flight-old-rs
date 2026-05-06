@@ -7,6 +7,8 @@ use static_cell::StaticCell;
 
 use crate::{Irqs, SystemSpawner, UsbPeripherals, sensors::imu};
 
+mod config_commands;
+
 pub fn init(spawner: SystemSpawner, p: UsbPeripherals) {
     let driver = usb::Driver::new(p.usb, Irqs);
     spawner.low_prio.spawn(usb_task(driver).unwrap());
@@ -71,6 +73,8 @@ async fn serial_handler(mut cdc: CdcAcmClass) {
     }
 }
 
+// TODO: currently limited to 64 byte response. We could leverage embedded_io_async::Write but this
+// supports no formatting out of the box.
 async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
     let mut buf = [0; 64];
     let mut parser = ShellParser::<32>::new();
@@ -84,23 +88,24 @@ async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
         while !remaining.is_empty() {
             let command;
             (command, remaining) = parser.parse(remaining);
-            response.write_str("\n\r").unwrap();
             match command {
                 Ok(Some(command)) => match command {
-                    ShellCommand::Calibrate => {
-                        match imu::calibrate().await {
-                            Ok(()) => response.write_str("calibration successful").unwrap(),
-                            Err(_) => response.write_str("calibration failed").unwrap(),
-                        }
+                    ShellCommand::Calibrate => match imu::calibrate().await {
+                        Ok(()) => _ = write!(response, "calibration successful"),
+                        Err(_) => _ = write!(response, "calibration failed"),
+                    },
+                    ShellCommand::Get { key } => {
+                        _ = config_commands::get_config(&mut response, key).await;
+                    }
+                    ShellCommand::Set { key, value } => {
+                        _ = config_commands::set_config(&mut response, key, value).await;
                     }
                 },
                 Ok(None) => continue,
-                Err(err) => {
-                    response.write_fmt(format_args!("shell error: {}", err)).unwrap();
-                }
+                Err(err) => _ = write!(response, "error parsing command: {}", err).unwrap(),
             }
+            _ = write!(response, "\n\r");
 
-            response.write_str("\n\r").unwrap();
             cdc.write_packet(response.as_bytes()).await?;
         }
     }
@@ -119,10 +124,10 @@ impl<const N: usize> ShellParser<N> {
         }
     }
 
-    fn parse<'a>(
-        &mut self,
-        data: &'a [u8],
-    ) -> (Result<Option<ShellCommand>, ShellParserError>, &'a [u8]) {
+    fn parse<'a, 'b>(
+        &'a mut self,
+        data: &'b [u8],
+    ) -> (Result<Option<ShellCommand<'a>>, ShellParserError>, &'b [u8]) {
         let mut line_iter = data.splitn(2, |&b| b == b'\n');
         let line_end = line_iter.next().unwrap(); // there is at least one item
 
@@ -151,16 +156,24 @@ impl<const N: usize> ShellParser<N> {
             return (Err(ShellParserError::InvalidUtf8Line), remaining);
         };
 
-        let mut word_iter = line.trim().split(' ');
+        let mut word_iter = line.trim().split_whitespace();
         let command = match word_iter.next() {
             Some("calibrate") => Some(ShellCommand::Calibrate),
-            // Some("set") => {
-            //     let Some(option_name) = word_iter.next() else {
-            //         return (Err(ShellParserError::InvalidCommand), remaining);
-            //     };
-            //
-            //     ShellCommand::Set
-            // },
+            Some("get") => {
+                let Some(key) = word_iter.next() else {
+                    return (Err(ShellParserError::InvalidCommand), remaining);
+                };
+                Some(ShellCommand::Get { key })
+            }
+            Some("set") => {
+                let Some(key) = word_iter.next() else {
+                    return (Err(ShellParserError::InvalidCommand), remaining);
+                };
+                let Some(value) = word_iter.remainder() else {
+                    return (Err(ShellParserError::InvalidCommand), remaining);
+                };
+                Some(ShellCommand::Set { key, value })
+            }
             Some(_) | None => return (Err(ShellParserError::InvalidCommand), remaining),
         };
 
@@ -168,18 +181,10 @@ impl<const N: usize> ShellParser<N> {
     }
 }
 
-enum ShellCommand {
+enum ShellCommand<'a> {
     Calibrate,
-    // Set(ConfigSet),
-    // Get(ConfigGet),
-}
-
-enum ConfigSet {
-    PilotName(&'static str),
-}
-
-enum ConfigGet {
-    PilotName,
+    Get { key: &'a str },
+    Set { key: &'a str, value: &'a str },
 }
 
 #[derive(Debug)]

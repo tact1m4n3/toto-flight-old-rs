@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 #![recursion_limit = "256"]
+// NOTE: used by usb_interface
+#![feature(str_split_whitespace_remainder)]
 
 mod black_box;
 mod nav_loop;

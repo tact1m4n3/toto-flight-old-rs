@@ -102,7 +102,7 @@ impl<T: Copy> SyncWatch<T> {
         }
     }
 
-    pub fn watcher(&self) -> SyncWatchReader<T> {
+    pub fn watcher<'a>(&'a self) -> SyncWatchReader<'a, T> {
         SyncWatchReader {
             state: &self.state,
             last_read_timestamp: None,

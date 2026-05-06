@@ -74,6 +74,7 @@ macro_rules! impl_get_set {
 }
 
 impl_get_set!(craft_name, Key::CraftName, [u8; 16]);
+
 impl_get_set!(gyro_bias, Key::GyroBias, [f32; 3]);
 impl_get_set!(accel_bias, Key::AccelBias, [f32; 3]);
 
@@ -100,6 +101,7 @@ impl_get_set!(right_elevon_mixer_gain, Key::RightElevonMixerGain, [f32; 3]);
 #[repr(u8)]
 pub enum Key {
     CraftName = 0,
+
     GyroBias = 1,
     AccelBias = 2,
 
@@ -131,6 +133,26 @@ impl TryFrom<u8> for Key {
             0 => Ok(Key::CraftName),
             1 => Ok(Key::GyroBias),
             2 => Ok(Key::AccelBias),
+
+            3 => Ok(Key::RollRateKp),
+            4 => Ok(Key::RollRateKi),
+            5 => Ok(Key::RollRateKff),
+            6 => Ok(Key::PitchRateKp),
+            7 => Ok(Key::PitchRateKi),
+            8 => Ok(Key::PitchRateKff),
+            9 => Ok(Key::YawRateKp),
+            10 => Ok(Key::YawRateKi),
+            11 => Ok(Key::YawRateKff),
+
+            12 => Ok(Key::LeftElevonMidPoint),
+            13 => Ok(Key::LeftElevonMinUs),
+            14 => Ok(Key::LeftElevonMaxUs),
+            15 => Ok(Key::LeftElevonMixerGain),
+            16 => Ok(Key::RightElevonMidPoint),
+            17 => Ok(Key::RightElevonMinUs),
+            18 => Ok(Key::RightElevonMaxUs),
+            19 => Ok(Key::RightElevonMixerGain),
+
             _ => Err(()),
         }
     }

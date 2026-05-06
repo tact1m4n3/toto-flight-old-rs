@@ -26,14 +26,6 @@ mutex_cells! {
     ACCEL_BIAS: Vector3<f32> = Vector3::ZERO;
 }
 
-pub fn get_gyro_bias() -> Vector3<f32> {
-    GYRO_BIAS.lock(|cell| cell.get())
-}
-
-pub fn get_accel_bias() -> Vector3<f32> {
-    ACCEL_BIAS.lock(|cell| cell.get())
-}
-
 signals! {
     INTERRUPT_SIGNAL: ();
     UNBIASED_IMU_FOR_CALIBRATION: (Vector3<f32>, Vector3<f32>);

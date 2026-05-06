@@ -14,7 +14,7 @@ use heapless::String;
 
 use crate::{
     Irqs, SdCardPeripherals, SystemSpawner, black_box::ardupilot_black_box_format::Logger,
-    nav_loop, pid_loop, receiver, sensors::imu, signals,
+    receiver, sensors::imu, signals,
 };
 
 mod ardupilot_black_box_format;
@@ -121,6 +121,7 @@ async fn task(fs: FileSystem) {
                 return;
             }
         };
+        next_log_id += 1;
 
         match log_loop(file).await {
             Ok(()) => (),
@@ -131,8 +132,6 @@ async fn task(fs: FileSystem) {
                 return;
             }
         }
-
-        next_log_id += 1;
     }
 }
 
