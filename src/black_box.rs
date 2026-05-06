@@ -146,8 +146,6 @@ async fn log_loop(file: File<'_>) -> Result<()> {
     let mut multimeter_watcher = crate::sensors::multimeter::DATA.watcher();
     let mut channels_watcher = receiver::CHANNELS.watcher();
     let mut link_stats_watcher = receiver::LINK_STATS.watcher();
-    // let mut motor_watcher = pid_loop::MOTOR_OUTPUT.watcher();
-    // let mut target_watcher = nav_loop::TARGET.watcher();
 
     let mut ticker = Ticker::every(Duration::from_hz(LOG_RATE_HZ));
     loop {
@@ -200,30 +198,23 @@ async fn log_loop(file: File<'_>) -> Result<()> {
             .await?;
         }
 
-        // if let Some((motor, _timestamp)) = motor_watcher.get_if_changed()
-        //     && are_we_recording()
-        // {
-        //     l.write_motor_output(
-        //         embassy_time::Instant::now().as_micros(),
-        //         motor.throttle,
-        //         motor.left_elevon,
-        //         motor.right_elevon,
-        //     )
-        //     .await?;
-        // }
-        //
-        // if let Some((target, _timestamp)) = target_watcher.get_if_changed()
-        //     && are_we_recording()
-        // {
-        //     if let Some(t) = target {
-        //         l.write_nav_target(
-        //             embassy_time::Instant::now().as_micros(),
-        //             t.throttle,
-        //             (t.rate.x, t.rate.y, t.rate.z),
-        //         )
-        //         .await?;
-        //     }
-        // }
+        if let Some((data, timestamp)) = crate::sensors::gps::DATA.watcher().get_if_changed()
+            && are_we_recording()
+        {
+            l.write_gps(
+                timestamp.as_micros(),
+                data.fix_type as u8,
+                data.num_sat,
+                data.hdop,
+                data.latitude,
+                data.longitude,
+                data.altitude,
+                data.speed,
+                data.heading,
+                data.vertical_velocity,
+            )
+            .await?;
+        }
 
         l.writer.flush().await?;
     }

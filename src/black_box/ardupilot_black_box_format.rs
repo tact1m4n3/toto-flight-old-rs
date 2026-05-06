@@ -2,7 +2,7 @@ use core::mem::size_of;
 use embassy_time::Instant;
 use nalgebra::Vector3;
 use zerocopy::byteorder::{F32, LE, U16, U32, U64};
-use zerocopy::{Immutable, IntoBytes, KnownLayout};
+use zerocopy::{I32, Immutable, IntoBytes, KnownLayout};
 
 use crate::utils::pack;
 
@@ -110,14 +110,14 @@ impl<W: embedded_io_async::Write> Logger<W> {
         )
         .await?;
 
-        // self.write_fmt(
-        //     TYPE_GPS,
-        //     size_of::<GpsMsg>() as u8,
-        //     "GPS",
-        //     "QBIHBfLLffff",
-        //     "TimeUS,Status,GMS,GWk,NSats,HDop,Lat,Lng,Alt,Spd,GCrs,VZ",
-        // )
-        // .await?;
+        self.write_fmt(
+            TYPE_GPS,
+            size_of::<GpsMsg>() as u8,
+            "GPS",
+            "QBBfLLfffff",
+            "TimeUS,Status,NSats,HDop,Lat,Lng,Alt,Spd,GCrs,VZ",
+        )
+        .await?;
 
         self.write_fmt(
             TYPE_BATTERY,
@@ -338,39 +338,35 @@ impl<W: embedded_io_async::Write> Logger<W> {
         .await
     }
 
-    // pub async fn write_gps(
-    //     &mut self,
-    //     time_us: u64,
-    //     status: u8,
-    //     gms: u32,
-    //     gwk: u16,
-    //     nsats: u8,
-    //     hdop: f32,
-    //     lat: i32,
-    //     lng: i32,  // × 1e7 degrees
-    //     alt: f32,  // metres MSL
-    //     spd: f32,  // m/s ground speed
-    //     gcrs: f32, // degrees ground course
-    //     vz: f32,   // m/s vertical (positive = down)
-    // ) -> Result<(), W::Error> {
-    //     self.write(&GpsMsg {
-    //         sync: SYNC,
-    //         type_: TYPE_GPS,
-    //         time_us: U64::new(time_us),
-    //         status,
-    //         gms: U32::new(gms),
-    //         gwk: U16::new(gwk),
-    //         nsats,
-    //         hdop: F32::new(hdop),
-    //         lat: I32::new(lat),
-    //         lng: I32::new(lng),
-    //         alt: F32::new(alt),
-    //         spd: F32::new(spd),
-    //         gcrs: F32::new(gcrs),
-    //         vz: F32::new(vz),
-    //     })
-    //     .await
-    // }
+pub async fn write_gps(
+    &mut self,
+    time_us: u64,
+    status: u8,
+    nsats: u8,
+    hdop: f32,
+    lat: f64,
+    lng: f64,
+    alt: f32,
+    spd: f32,
+    crs: f32,
+    vz: f32,
+) -> Result<(), W::Error> {
+    self.write(&GpsMsg {
+        sync: SYNC,
+        type_: TYPE_GPS,
+        time_us: U64::new(time_us),
+        status,
+        nsats,
+        hdop: F32::new(hdop),
+        lat: I32::new((lat * 1e7) as i32),
+        lng: I32::new((lng * 1e7) as i32),
+        alt: F32::new(alt),
+        spd: F32::new(spd),
+        crs: F32::new(crs),
+        vz: F32::new(vz),
+    })
+    .await
+}
 
     pub async fn write_bat(
         &mut self,
@@ -596,24 +592,22 @@ struct GyroMsg {
     gyro_z: F32<LE>,
 }
 
-// #[derive(IntoBytes, KnownLayout, Immutable)]
-// #[repr(C, packed)]
-// struct GpsMsg {
-//     sync: [u8; 2],
-//     type_: u8,
-//     time_us: U64<LE>,
-//     status: u8,    // 0=no fix, 1=2D, 2=3D, 3=3D+DGPS, 4=3D+RTK
-//     gms: U32<LE>,  // GPS time milliseconds from start of week
-//     gwk: U16<LE>,  // GPS week
-//     nsats: u8,     // number of satellites
-//     hdop: F32<LE>, // horizontal dilution of precision
-//     lat: I32<LE>,  // latitude  × 1e7 degrees
-//     lng: I32<LE>,  // longitude × 1e7 degrees
-//     alt: F32<LE>,  // altitude MSL (m)
-//     spd: F32<LE>,  // ground speed (m/s)
-//     gcrs: F32<LE>, // ground course (degrees)
-//     vz: F32<LE>,   // vertical speed (m/s, positive = down)
-// }
+#[derive(IntoBytes, KnownLayout, Immutable)]
+#[repr(C, packed)]
+struct GpsMsg {
+    sync: [u8; 2],
+    type_: u8,
+    time_us: U64<LE>,
+    status: u8,    // GPS fix type
+    nsats: u8,     // number of satellites
+    hdop: F32<LE>, // horizontal dilution of precision
+    lat: I32<LE>,  // latitude in degrees * 1e7
+    lng: I32<LE>,  // longitude in degrees * 1e7
+    alt: F32<LE>,  // altitude in meters
+    spd: F32<LE>,  // ground speed in m/s
+    crs: F32<LE>,  // ground course in degrees
+    vz: F32<LE>,   // vertical speed in m/s
+}
 
 #[derive(IntoBytes, KnownLayout, Immutable)]
 #[repr(C, packed)]

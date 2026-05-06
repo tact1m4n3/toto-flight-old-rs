@@ -4,7 +4,21 @@ use embedded_io_async::Read;
 use static_cell::StaticCell;
 use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRef};
 
-use crate::{GpsPeripherals, Irqs, SystemSpawner, mutex_cells};
+use crate::{GpsPeripherals, Irqs, SystemSpawner, mutex_cells, utils::SyncWatch};
+
+pub static DATA: SyncWatch<Data> = SyncWatch::new(Data {
+    latitude: 0.0,
+    longitude: 0.0,
+    altitude: 0.0,
+    h_acc: f32::INFINITY,
+    v_acc: f32::INFINITY,
+    speed: 0.0,
+    heading: 0.0,
+    num_sat: 0,
+    hdop: f32::INFINITY,
+    fix_type: FixType::Undefined,
+    vertical_velocity: 0.0,
+});
 
 mutex_cells! {
     PPS_TIMESTAMP: Option<Instant> = None;
@@ -47,25 +61,22 @@ async fn main_task(mut uart_rx: uart::BufferedUartRx) {
                                         measurement_delay = now - pps_instant;
                                     }
 
-                                    let measurement_time = now.saturating_sub(measurement_delay);
+                                    let timestamp = now.saturating_sub(measurement_delay);
+                                    let data = Data {
+                                        latitude: pvt.latitude(),
+                                        longitude: pvt.longitude(),
+                                        altitude: pvt.height_msl() as f32,
+                                        h_acc: pvt.horizontal_accuracy() as f32,
+                                        v_acc: pvt.vertical_accuracy() as f32,
+                                        speed: pvt.ground_speed_2d() as f32,
+                                        heading: pvt.heading_motion() as f32,
+                                        num_sat: pvt.num_satellites(),
+                                        hdop: pvt.pdop() as f32,
+                                        fix_type: pvt.fix_type().into(),
+                                        vertical_velocity: pvt.vel_down() as f32,
+                                    };
 
-                                    // let data = Data {
-                                    //     latitude: pvt.latitude(),
-                                    //     longitude: pvt.longitude(),
-                                    //     altitude: pvt.height_msl() as f32,
-                                    //     h_acc: pvt.horizontal_accuracy() as f32,
-                                    //     v_acc: pvt.vertical_accuracy() as f32,
-                                    //     speed: pvt.ground_speed_2d() as f32,
-                                    //     heading: pvt.heading_motion() as f32,
-                                    //     num_sat: pvt.num_satellites(),
-                                    //     hdop: pvt.pdop() as f32,
-                                    //     fix_type: pvt.fix_type().into(),
-                                    //     vertical_velocity: pvt.vel_down() as f32,
-                                    //     measurement_time: now.saturating_sub(measurement_delay),
-                                    // };
-
-                                    // TODO: input to control
-                                    // TODO: log data to telemetry
+                                    DATA.set_with_timestamp(data, timestamp);
                                 }
                                 _ => {}
                             }
@@ -116,8 +127,6 @@ pub struct Data {
     pub fix_type: FixType,
     /// Vertical velocity (speed downward) in m/s
     pub vertical_velocity: f32,
-    /// At what point in time was this measured
-    pub measurement_time: Instant,
 }
 
 #[derive(Clone, Copy, defmt::Format)]
