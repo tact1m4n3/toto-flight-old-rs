@@ -9,7 +9,12 @@ use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice};
 use nalgebra::Vector3;
 
 use crate::{
-    ImuPeripherals, Irqs, SystemSpawner, drivers::lsm6dsv::{self, Lsm6dsv16b}, mutex_cells, nav_loop::ArmBlocker, persistent_config, signals, utils::{NalgebraVec3Ext, SyncWatch}
+    ImuPeripherals, Irqs, SystemSpawner,
+    drivers::lsm6dsv::{self, Lsm6dsv16b},
+    mutex_cells,
+    nav_loop::ArmBlocker,
+    persistent_config, signals,
+    utils::{NalgebraVec3Ext, SyncWatch},
 };
 
 type Device = ExclusiveDevice<spi::Spi<'static, SPI1, spi::Async>, gpio::Output<'static>, Delay>;
@@ -98,17 +103,21 @@ async fn interrupt_listener_task(mut interrupt_pin: gpio::Input<'static>) {
     }
 }
 
-pub struct CalibrationAlreadyInProgressError;
+#[derive(defmt::Format)]
+pub enum CalibrationError {
+    AlreadyInProgress,
+    ArmBlock,
+}
 
-pub async fn calibrate() -> Result<(), CalibrationAlreadyInProgressError> {
+pub async fn calibrate() -> Result<(), CalibrationError> {
     const CALIBRATION_SAMPLES: usize = 1000;
+
+    let _arm_guard = ArmBlocker::new().map_err(|_| CalibrationError::ArmBlock)?;
 
     static CALIBRATING: AtomicBool = AtomicBool::new(false);
     if CALIBRATING.swap(true, Ordering::Relaxed) {
-        return Err(CalibrationAlreadyInProgressError);
+        return Err(CalibrationError::AlreadyInProgress);
     }
-
-    let _blocker = ArmBlocker::new();
 
     defmt::debug!("calibration started");
 

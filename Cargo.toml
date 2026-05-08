@@ -40,6 +40,9 @@ heapless = "0.9.2"
 assign-resources = "0.5.0"
 futures = { version = "0.3.32", default-features = false, features = ["async-await"] }
 bitflags = "2.11.0"
+paste = "1.0.15"
+num-derive = "0.4.2"
+num-traits = { version = "0.2.19", default-features = false }
 
 fixed = "1.30.0"
 libm = { version = "0.2.16", default-features = false }
@@ -52,8 +55,8 @@ ahrs = { version = "0.8.0", default-features = false }
 ina226-tp = { version = "0.4.1", features = ["async"] }
 
 zerocopy = { version = "0.8.48", features = ["derive"] }
+
 sequential-storage = { version = "7.2.0", default-features = false, features = ["defmt"] }
-paste = "1.0.15"
 
 [patch.crates-io]
 embedded-sdmmc = { path = "../embedded-sdmmc-rs/" }

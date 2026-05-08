@@ -5,7 +5,7 @@ use embassy_usb::{class::cdc_acm, driver::EndpointError};
 use heapless::String;
 use static_cell::StaticCell;
 
-use crate::{Irqs, SystemSpawner, UsbPeripherals, sensors::imu};
+use crate::{Irqs, SystemSpawner, UsbPeripherals, nav_loop::ArmBlocker, sensors::imu};
 
 mod config_commands;
 
@@ -37,15 +37,14 @@ async fn usb_task(driver: Driver) -> ! {
         static BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
         static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
 
-        let builder = embassy_usb::Builder::new(
+        embassy_usb::Builder::new(
             driver,
             config,
             CONFIG_DESCRIPTOR.init([0; 256]),
             BOS_DESCRIPTOR.init([0; 256]),
             &mut [], // no msos descriptors
             CONTROL_BUF.init([0; 64]),
-        );
-        builder
+        )
     };
 
     // Create classes on the builder.
@@ -67,7 +66,7 @@ async fn serial_handler(mut cdc: CdcAcmClass) {
     loop {
         cdc.wait_connection().await;
         defmt::info!("usb connected");
-        // TODO: acquire arm lock
+        let _arm_guard = ArmBlocker::new();
         let _ = shell(&mut cdc).await;
         defmt::info!("usb disconnected");
     }
@@ -92,7 +91,14 @@ async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
                 Ok(Some(command)) => match command {
                     ShellCommand::Calibrate => match imu::calibrate().await {
                         Ok(()) => _ = write!(response, "calibration successful"),
-                        Err(_) => _ = write!(response, "calibration failed"),
+                        Err(imu::CalibrationError::AlreadyInProgress) => {
+                            _ = write!(response, "error: calibration already in progress")
+                        }
+                        Err(imu::CalibrationError::ArmBlock) => {
+                            // NOTE: technically the usb shell already blocks arming so this case
+                            // is not possible
+                            _ = write!(response, "error: drone armed")
+                        }
                     },
                     ShellCommand::Get { key } => {
                         _ = config_commands::get_config(&mut response, key).await;
@@ -102,7 +108,7 @@ async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
                     }
                 },
                 Ok(None) => continue,
-                Err(err) => _ = write!(response, "error parsing command: {}", err).unwrap(),
+                Err(err) => _ = write!(response, "error parsing command: {}", err),
             }
             _ = write!(response, "\n\r");
 
@@ -156,7 +162,7 @@ impl<const N: usize> ShellParser<N> {
             return (Err(ShellParserError::InvalidUtf8Line), remaining);
         };
 
-        let mut word_iter = line.trim().split_whitespace();
+        let mut word_iter = line.split_whitespace();
         let command = match word_iter.next() {
             Some("calibrate") => Some(ShellCommand::Calibrate),
             Some("get") => {

@@ -88,16 +88,14 @@ impl Storage {
 
         let mut next_blackbox_log_id: u16 = 0;
         root_dir.iterate_dir(|entry| {
-            if entry.name.extension() == LOG_FILE_EXTENSION.as_bytes() {
-                if let Ok(name) = str::from_utf8(entry.name.base_name()) {
-                    if let Some(Ok(id)) = name
-                        .strip_prefix(LOG_FILE_PREFIX)
-                        .map(|id_str| id_str.parse::<u16>())
-                        && next_blackbox_log_id <= id
-                    {
-                        next_blackbox_log_id = id + 1;
-                    }
-                }
+            if entry.name.extension() == LOG_FILE_EXTENSION.as_bytes()
+                && let Ok(name) = str::from_utf8(entry.name.base_name())
+                && let Some(Ok(id)) = name
+                    .strip_prefix(LOG_FILE_PREFIX)
+                    .map(|id_str| id_str.parse::<u16>())
+                && next_blackbox_log_id <= id
+            {
+                next_blackbox_log_id = id + 1;
             }
             ControlFlow::Continue(())
         })?;
@@ -134,11 +132,11 @@ impl Storage {
             return Ok(());
         }
 
-        if NEW_FILE_FLAG.swap(false, Ordering::Relaxed) {
-            if let Some(raw_file) = self.active_file {
-                let file = raw_file.to_file(&self.volume_manager);
-                file.close()?;
-            }
+        if NEW_FILE_FLAG.swap(false, Ordering::Relaxed)
+            && let Some(raw_file) = self.active_file
+        {
+            let file = raw_file.to_file(&self.volume_manager);
+            file.close()?;
         }
 
         if self.active_file.is_none() {
@@ -182,7 +180,7 @@ impl Storage {
                 defmt::info!("log file size limit reached, creating new log file");
                 Ok(())
             }
-            Err(err) => return Err(err),
+            Err(err) => Err(err),
         }
     }
 

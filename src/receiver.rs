@@ -1,8 +1,8 @@
+use crsf::Payload;
 use embassy_rp::uart;
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{Read, Write};
 use static_cell::StaticCell;
-use crsf::Payload;
 
 use crate::{Irqs, ReceiverPeripherals, sensors::multimeter, utils::SyncWatch};
 
@@ -108,8 +108,8 @@ async fn telemetry_sender(mut uart_tx: uart::BufferedUartTx) {
             packet.set_remaining(0); // we don't have this info
 
             packet.encode(&mut buf);
-            if let Err(_) = uart_tx.write(&buf[..packet.len()]).await {
-                defmt::warn!("failed to write to uart");
+            if let Err(err) = uart_tx.write(&buf[..packet.len()]).await {
+                defmt::warn!("failed to write to uart: {}", err);
             }
         }
     }
@@ -118,5 +118,5 @@ async fn telemetry_sender(mut uart_tx: uart::BufferedUartTx) {
 fn crsf_read_raw_rc(raw: u16) -> u16 {
     debug_assert!(raw >= crsf::RcChannelsPacked::CHANNEL_VALUE_MIN);
     debug_assert!(raw <= crsf::RcChannelsPacked::CHANNEL_VALUE_MAX);
-    return ((raw as u32) * 1024 / 1639 + 881) as u16;
+    ((raw as u32) * 1024 / 1639 + 881) as u16
 }

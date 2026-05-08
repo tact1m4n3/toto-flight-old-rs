@@ -2,7 +2,8 @@ use core::ops::Range;
 
 use embassy_rp::{flash, peripherals::FLASH};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use sequential_storage::cache::NoCache;
+use num_traits::FromPrimitive;
+use sequential_storage::{cache::NoCache, map::Value};
 
 use crate::{FlashPeripherals, Irqs};
 
@@ -27,6 +28,38 @@ pub async fn init(p: FlashPeripherals) {
     STORAGE.lock().await.replace(storage);
 }
 
+const BUF_SIZE: usize = 32;
+
+pub async fn get<T: Copy + for<'a> Value<'a>>(key: Key) -> Option<T> {
+    let mut storage = STORAGE.lock().await;
+    let storage = storage.as_mut()?;
+    let mut data_buffer: [u8; BUF_SIZE] = [0; BUF_SIZE];
+    match storage.fetch_item::<T>(&mut data_buffer, &key).await {
+        Ok(value) => value,
+        Err(err) => {
+            defmt::warn!("failed to read config for {}: {}", stringify!($name), err);
+            None
+        }
+    }
+}
+
+pub async fn set<T: Copy + for<'a> Value<'a>>(key: Key, value: T) {
+    let mut storage = STORAGE.lock().await;
+    let Some(storage) = storage.as_mut() else {
+        return;
+    };
+    let mut data_buffer: [u8; BUF_SIZE] = [0; BUF_SIZE];
+    match storage
+        .store_item::<T>(&mut data_buffer, &key, &value)
+        .await
+    {
+        Ok(()) => (),
+        Err(err) => {
+            defmt::warn!("failed to write config for {}: {}", stringify!($name), err);
+        }
+    }
+}
+
 macro_rules! impl_get_set {
     ($name:ident, $key:expr, $typ:ty) => {
         const _: Key = $key; // assert key type
@@ -34,40 +67,12 @@ macro_rules! impl_get_set {
         paste::paste! {
             #[allow(unused)]
             pub async fn [<get_ $name>]() -> Option<$typ> {
-                let mut storage = STORAGE.lock().await;
-                let Some(storage) = storage.as_mut() else {
-                    return None;
-                };
-                const SIZE: usize =
-                    (core::mem::size_of::<Key>() + core::mem::size_of::<$typ>()) + FLASH_WORD_SIZE;
-                let mut data_buffer: [u8; SIZE] = [0; SIZE];
-                match storage.fetch_item::<$typ>(&mut data_buffer, &$key).await {
-                    Ok(value) => value,
-                    Err(err) => {
-                        defmt::warn!("failed to read config for {}: {}", stringify!($name), err);
-                        None
-                    }
-                }
+                get($key).await
             }
 
             #[allow(unused)]
             pub async fn [<set_ $name>](value: $typ) {
-                let mut storage = STORAGE.lock().await;
-                let Some(storage) = storage.as_mut() else {
-                    return;
-                };
-                const SIZE: usize =
-                    core::mem::size_of::<Key>() + core::mem::size_of::<$typ>() + FLASH_WORD_SIZE;
-                let mut data_buffer: [u8; SIZE] = [0; SIZE];
-                match storage
-                    .store_item::<$typ>(&mut data_buffer, &$key, &value)
-                    .await
-                {
-                    Ok(()) => (),
-                    Err(err) => {
-                        defmt::warn!("failed to write config for {}: {}", stringify!($name), err);
-                    }
-                }
+                set($key, value).await
             }
         }
     };
@@ -89,15 +94,13 @@ impl_get_set!(yaw_rate_ki, Key::YawRateKi, f32);
 impl_get_set!(yaw_rate_kff, Key::YawRateKff, f32);
 
 impl_get_set!(left_elevon_mid_point, Key::LeftElevonMidPoint, i16);
-impl_get_set!(left_elevon_min_us, Key::LeftElevonMinUs, i16);
-impl_get_set!(left_elevon_max_us, Key::LeftElevonMaxUs, i16);
+impl_get_set!(left_elevon_range_us, Key::LeftElevonRangeUs, [i16; 2]);
 impl_get_set!(left_elevon_mixer_gain, Key::LeftElevonMixerGain, [f32; 3]);
 impl_get_set!(right_elevon_mid_point, Key::RightElevonMidPoint, i16);
-impl_get_set!(right_elevon_min_us, Key::RightElevonMinUs, i16);
-impl_get_set!(right_elevon_max_us, Key::RightElevonMaxUs, i16);
+impl_get_set!(right_elevon_range_us, Key::RightElevonRangeUs, [i16; 2]);
 impl_get_set!(right_elevon_mixer_gain, Key::RightElevonMixerGain, [f32; 3]);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, num_derive::FromPrimitive)]
 #[repr(u8)]
 pub enum Key {
     CraftName = 0,
@@ -116,46 +119,11 @@ pub enum Key {
     YawRateKff = 11,
 
     LeftElevonMidPoint = 12,
-    LeftElevonMinUs = 13,
-    LeftElevonMaxUs = 14,
-    LeftElevonMixerGain = 15,
-    RightElevonMidPoint = 16,
-    RightElevonMinUs = 17,
-    RightElevonMaxUs = 18,
-    RightElevonMixerGain = 19,
-}
-
-impl TryFrom<u8> for Key {
-    type Error = ();
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Key::CraftName),
-            1 => Ok(Key::GyroBias),
-            2 => Ok(Key::AccelBias),
-
-            3 => Ok(Key::RollRateKp),
-            4 => Ok(Key::RollRateKi),
-            5 => Ok(Key::RollRateKff),
-            6 => Ok(Key::PitchRateKp),
-            7 => Ok(Key::PitchRateKi),
-            8 => Ok(Key::PitchRateKff),
-            9 => Ok(Key::YawRateKp),
-            10 => Ok(Key::YawRateKi),
-            11 => Ok(Key::YawRateKff),
-
-            12 => Ok(Key::LeftElevonMidPoint),
-            13 => Ok(Key::LeftElevonMinUs),
-            14 => Ok(Key::LeftElevonMaxUs),
-            15 => Ok(Key::LeftElevonMixerGain),
-            16 => Ok(Key::RightElevonMidPoint),
-            17 => Ok(Key::RightElevonMinUs),
-            18 => Ok(Key::RightElevonMaxUs),
-            19 => Ok(Key::RightElevonMixerGain),
-
-            _ => Err(()),
-        }
-    }
+    LeftElevonRangeUs = 13,
+    LeftElevonMixerGain = 14,
+    RightElevonMidPoint = 15,
+    RightElevonRangeUs = 16,
+    RightElevonMixerGain = 17,
 }
 
 impl sequential_storage::map::Key for Key {
@@ -175,9 +143,10 @@ impl sequential_storage::map::Key for Key {
         buffer: &[u8],
     ) -> Result<(Self, usize), sequential_storage::map::SerializationError> {
         if buffer.len() >= 1 {
-            Self::try_from(buffer[0])
-                .map(|key| (key, 1))
-                .map_err(|_| sequential_storage::map::SerializationError::InvalidData)
+            Self::from_u8(buffer[0]).map_or(
+                Err(sequential_storage::map::SerializationError::InvalidData),
+                |key| Ok((key, 1)),
+            )
         } else {
             Err(sequential_storage::map::SerializationError::BufferTooSmall)
         }

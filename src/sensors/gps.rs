@@ -52,6 +52,7 @@ async fn main_task(mut uart_rx: uart::BufferedUartRx) {
                         Ok(packet) => {
                             let UbxPacket::Proto33(ref packet) = packet;
 
+                            #[allow(clippy::single_match)]
                             match packet {
                                 PacketRef::NavPvt(pvt) => {
                                     let now = Instant::now();

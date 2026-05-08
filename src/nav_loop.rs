@@ -7,7 +7,8 @@ use embassy_time::{Duration, Instant, Ticker};
 use nalgebra::Vector3;
 
 use crate::{
-    SystemSpawner, black_box, receiver, utils::{SyncWatch, US_TO_NEG_ONE_ONE}
+    SystemSpawner, black_box, pid_loop, receiver,
+    utils::{SyncWatch, US_TO_NEG_ONE_ONE},
 };
 
 pub static COMMAND: SyncWatch<Command> = SyncWatch::new(Command::Idle);
@@ -43,6 +44,11 @@ async fn nav_loop() {
             state: false,
         },
     };
+    let mut servo_mid_point_calibration_condition = ChannelCondition {
+        channel_idx: 6,
+        range: 1500..=2000,
+        state: true,
+    };
 
     let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
     loop {
@@ -50,24 +56,27 @@ async fn nav_loop() {
 
         let (channels, channels_timestamp) = receiver::CHANNELS.get_with_timestamp();
 
+        let mut arm_request: Option<bool> = None;
+
         // TODO: failsafe logic should be abstracted and implemented as a state machine a more
         // complicated algorithm is implemented
         if !failsafe && Instant::now() - channels_timestamp > Duration::from_millis(1000) {
             // disarm on failsafe
-            is_armed = false;
+            arm_request = Some(false);
             failsafe = true;
         } else {
             failsafe = false;
         }
 
-        if let Some(arm_request) = arm_condition.update(&channels) {
+        if let Some(arm_request) = arm_condition.update(&channels).or(arm_request) {
             match arm_request {
-                true if !is_armed && !failsafe && can_arm() => {
+                true if !is_armed && !failsafe && ArmBlocker::arm().is_ok() => {
                     is_armed = true;
                     black_box::begin_new_file();
                     black_box::set_recording_enabled(true);
                 }
                 false => {
+                    ArmBlocker::disarm();
                     is_armed = false;
                     black_box::set_recording_enabled(false);
                 }
@@ -76,6 +85,10 @@ async fn nav_loop() {
         }
 
         let flight_mode = flight_mode_manager.update(&channels);
+
+        if let Some(enable) = servo_mid_point_calibration_condition.update(&channels) {
+            pid_loop::set_mid_point_calibration_enabled(enable);
+        }
 
         let command: Command = if is_armed {
             match flight_mode {
@@ -91,9 +104,9 @@ async fn nav_loop() {
                     throttle: channels[2],
                     rate: Vector3::new(
                         // TODO: apply configurable rates
-                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 90.0,
-                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 90.0,
-                        US_TO_NEG_ONE_ONE.map(channels[3] as f32) * 90.0,
+                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels[3] as f32) * 45.0,
                     ),
                 },
             }
@@ -147,24 +160,60 @@ impl ChannelCondition {
     }
 }
 
-static ARM_BLOCKERS: AtomicU32 = AtomicU32::new(0);
-
-fn can_arm() -> bool {
-    ARM_BLOCKERS.load(Ordering::Relaxed) == 0
-}
+static ARM_BLOCK: AtomicU32 = AtomicU32::new(0);
+const ARMED_FLAG_MASK: u32 = 1 << 31;
 
 pub struct ArmBlocker(());
 
 impl ArmBlocker {
-    pub fn new() -> Self {
-        assert!(ARM_BLOCKERS.fetch_add(1, Ordering::Acquire) < u32::MAX);
-        Self(())
+    pub fn new() -> Result<Self, ()> {
+        let state = ARM_BLOCK.fetch_add(1, Ordering::Relaxed);
+        assert!(state & !ARMED_FLAG_MASK < 0xFFF_FFFF);
+        if state & ARMED_FLAG_MASK != 0 {
+            Err(())
+        } else {
+            Ok(Self(()))
+        }
+    }
+
+    fn arm() -> Result<(), u32> {
+        loop {
+            let state = ARM_BLOCK.load(Ordering::Relaxed);
+            // if already armed
+            if state & ARMED_FLAG_MASK != 0 {
+                break Ok(());
+            }
+            // if there are any arm blockers
+            if state & !ARMED_FLAG_MASK != 0 {
+                break Err(state & !ARMED_FLAG_MASK);
+            }
+            // this should never fail on a single core
+            if ARM_BLOCK
+                .compare_exchange_weak(
+                    state,
+                    state | ARMED_FLAG_MASK,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break Ok(());
+            }
+        }
+    }
+
+    fn disarm() {
+        let state = ARM_BLOCK.load(Ordering::Relaxed);
+        // if armed, reset the field
+        if state & ARMED_FLAG_MASK != 0 {
+            ARM_BLOCK.store(0, Ordering::Relaxed);
+        }
     }
 }
 
 impl Drop for ArmBlocker {
     fn drop(&mut self) {
-        assert!(ARM_BLOCKERS.fetch_sub(1, Ordering::Release) != 0);
+        assert!(ARM_BLOCK.fetch_sub(1, Ordering::Release) != 0);
     }
 }
 

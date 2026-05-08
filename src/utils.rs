@@ -153,3 +153,21 @@ impl<'a, T: Copy> SyncWatchReader<'a, T> {
         })
     }
 }
+
+pub struct GuardedRefCell<T: ?Sized>(RefCell<T>);
+
+impl<T> GuardedRefCell<T> {
+    pub const fn new(value: T) -> Self {
+        Self(RefCell::new(value))
+    }
+}
+
+impl<T: ?Sized> GuardedRefCell<T> {
+    pub fn guarded_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> R {
+        f(&mut self.0.borrow())
+    }
+
+    pub fn guarded_mut<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
+        f(&mut self.0.borrow_mut())
+    }
+}
