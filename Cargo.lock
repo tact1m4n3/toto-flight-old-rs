@@ -691,6 +691,7 @@ dependencies = [
 [[package]]
 name = "embedded-sdmmc"
 version = "0.9.0"
+source = "git+https://github.com/tact1m4n3/embedded-sdmmc-rs?branch=max_file_size_error#7449bc2949cc31c45d1692ebae9ba9f02b123837"
 dependencies = [
  "arbitrary-int",
  "bitbybit",

@@ -59,7 +59,7 @@ zerocopy = { version = "0.8.48", features = ["derive"] }
 sequential-storage = { version = "7.2.0", default-features = false, features = ["defmt"] }
 
 [patch.crates-io]
-embedded-sdmmc = { path = "../embedded-sdmmc-rs/" }
+embedded-sdmmc = { git = "https://github.com/tact1m4n3/embedded-sdmmc-rs", branch = "max_file_size_error" }
 
 [profile.dev]
 codegen-units = 1
