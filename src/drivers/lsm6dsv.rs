@@ -1,19 +1,24 @@
 //! LSM6DSV IMU driver
-//! Ported from Betaflight's accgyro_spi_lsm6dsv16x.c
+//! Based on Betaflight's accgyro_spi_lsm6dsv16x.c
 //!
 //! Generic over embedded-hal-async SpiDevice.
 //! ODR: High-Accuracy mode 1 @ 1000 Hz for both sensors.
 //! Full scale: ±2000 dps gyro, ±16 g accel.
 
+// TODO: add support for multiple data rates
+
+use embassy_time::{Duration, Timer};
 use embedded_hal_async::spi::SpiDevice;
 
-pub type Lsm6dsv16b<SPI> = Lsm6dsv<SPI, 0x71>;
+pub type Lsm6dsv<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
+pub type Lsm6dsv16x<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
+pub type Lsm6dsv16b<SPI> = Lsm6dsvGeneric<SPI, 0x71, true>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImuData {
-    /// Angular rate in degrees/s
+    /// Angular rate in rad/s
     pub gyro: [f32; 3],
-    /// Linear acceleration in g
+    /// Linear acceleration in m/s^2
     pub accel: [f32; 3],
 }
 
@@ -29,11 +34,12 @@ impl<SpiE> From<SpiE> for Error<SpiE> {
     }
 }
 
-pub struct Lsm6dsv<SPI, const WHO_AM_I_REG: u8> {
+pub struct Lsm6dsvGeneric<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool> {
     spi: SPI,
 }
 
-impl<SPI, const WHO_AM_I_REG: u8> Lsm6dsv<SPI, WHO_AM_I_REG>
+impl<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool>
+    Lsm6dsvGeneric<SPI, WHO_AM_I_REG, ACCEL_AXES_ORDER_REVERSED>
 where
     SPI: SpiDevice,
 {
@@ -44,56 +50,57 @@ where
     }
 
     async fn init(&mut self) -> Result<(), Error<SPI::Error>> {
-        // 1. Verify device identity
+        // Verify device identity
         let whoami = self.read_reg(WHO_AM_I).await?;
         if whoami != WHO_AM_I_REG {
             return Err(Error::WhoAmI(whoami));
         }
 
-        // 2. Software reset (sets all registers to default)
+        // Software reset (sets all registers to default)
         self.write_reg(CTRL3, CTRL3_SW_RESET).await?;
         // Poll until reset completes (bit self-clears)
         loop {
+            Timer::after(Duration::from_millis(1)).await;
             let v = self.read_reg(CTRL3).await?;
             if v & CTRL3_SW_RESET == 0 {
                 break;
             }
         }
 
-        // 3. Enable register auto-increment + Block Data Update
-        //    BDU prevents reading mismatched high/low bytes across a sample boundary.
+        // Enable register auto-increment + Block Data Update
+        // BDU prevents reading mismatched high/low bytes across a sample boundary.
         self.write_reg(CTRL3, CTRL3_IF_INC | CTRL3_BDU).await?;
 
-        // 4. Select High-Accuracy ODR table 1
-        //    (gives 1000 Hz when ODR nibble = 9, matching CTRL1_ODR_XL_1000HZ / CTRL2_ODR_G_1000HZ)
+        // Select High-Accuracy ODR table 1
+        // (gives 1000 Hz when ODR nibble = 9, matching CTRL1_ODR_XL_1000HZ / CTRL2_ODR_G_1000HZ)
         self.write_reg(HAODR_CFG, HAODR_MODE1).await?;
 
-        // 5. Accelerometer: ±16 g full scale + Strong LPF2 for vibration rejection
+        // Accelerometer: ±16 g full scale + Strong LPF2 for vibration rejection
         self.write_reg(CTRL8, CTRL8_HP_LPF2_XL_BW_STRONG | CTRL8_FS_XL_16G)
             .await?;
 
-        // 6. Gyroscope: ±2000 dps full scale + UltraLight LPF1 (lowest latency)
+        // Gyroscope: ±2000 dps full scale + UltraLight LPF1 (lowest latency)
         self.write_reg(CTRL6, CTRL6_LPF1_G_BW_ULTRALIGHT | CTRL6_FS_G_2000DPS)
             .await?;
 
-        // 7. Enable gyroscope LPF1 digital filter
+        // Enable gyroscope LPF1 digital filter
         self.write_reg(CTRL7, CTRL7_LPF1_G_EN).await?;
 
-        // 8. Enable accelerometer LPF2 digital filter
+        // Enable accelerometer LPF2 digital filter
         self.write_reg(CTRL9, CTRL9_LPF2_XL_EN).await?;
 
-        // 9. Accelerometer: High-Accuracy mode, 1000 Hz ODR
+        // Accelerometer: High-Accuracy mode, 1000 Hz ODR
         self.write_reg(CTRL1, CTRL1_OP_MODE_XL_HIGH_ACCURACY | CTRL1_ODR_XL_1000HZ)
             .await?;
 
-        // 10. Gyroscope: High-Accuracy mode, 1000 Hz ODR
+        // Gyroscope: High-Accuracy mode, 1000 Hz ODR
         self.write_reg(CTRL2, CTRL2_OP_MODE_G_HIGH_ACCURACY | CTRL2_ODR_G_1000HZ)
             .await?;
 
-        // 11. DRDY interrupt: pulsed (clears automatically, no register read needed to unlatch)
+        // DRDY interrupt: pulsed (clears automatically, no register read needed to unlatch)
         self.write_reg(CTRL4, CTRL4_DRDY_PULSED).await?;
 
-        // 12. Route gyro DRDY only to INT1 pin
+        // Route gyro DRDY only to INT1 pin
         //     The interrupt fires when gyro data is ready; accel at the same ODR
         //     will be ready by the time we complete the SPI transaction.
         self.write_reg(INT1_CTRL, INT1_DRDY_G).await?;
@@ -107,20 +114,33 @@ where
         buf[0] = OUTX_L_G | SPI_READ;
         self.spi.transfer_in_place(&mut buf).await?;
 
-        // buf[0]  = dummy (address echo / don't care)
+        // buf[0]  = dummy (address echo)
         // buf[1..=2]   = OUTX_L_G / OUTX_H_G  → gyro X
         // buf[3..=4]   = OUTY_L_G / OUTY_H_G  → gyro Y
         // buf[5..=6]   = OUTZ_L_G / OUTZ_H_G  → gyro Z
-        // buf[7..=8]   = OUTX_L_A / OUTX_H_A  → accel X
-        // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
-        // buf[11..=12] = OUTZ_L_A / OUTZ_H_A  → accel Z
 
         let gx = i16::from_le_bytes([buf[1], buf[2]]);
         let gy = i16::from_le_bytes([buf[3], buf[4]]);
         let gz = i16::from_le_bytes([buf[5], buf[6]]);
-        let ax = i16::from_le_bytes([buf[7], buf[8]]);
-        let ay = i16::from_le_bytes([buf[9], buf[10]]);
-        let az = i16::from_le_bytes([buf[11], buf[12]]);
+
+        let (ax, ay, az) = match ACCEL_AXES_ORDER_REVERSED {
+            false => (
+                // buf[7..=8]   = OUTX_L_A / OUTX_H_A  → accel X
+                // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
+                // buf[11..=12] = OUTZ_L_A / OUTZ_H_A  → accel Z
+                i16::from_le_bytes([buf[7], buf[8]]),
+                i16::from_le_bytes([buf[9], buf[10]]),
+                i16::from_le_bytes([buf[11], buf[12]]),
+            ),
+            true => (
+                // buf[7..=8]   = OUTZ_L_A / OUTZ_H_A  → accel Z
+                // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
+                // buf[11..=12] = OUTX_L_A / OUTX_H_A  → accel X
+                i16::from_le_bytes([buf[11], buf[12]]),
+                i16::from_le_bytes([buf[9], buf[10]]),
+                i16::from_le_bytes([buf[7], buf[8]]),
+            ),
+        };
 
         Ok(ImuData {
             gyro: [
@@ -136,20 +156,13 @@ where
         })
     }
 
-    async fn write_reg(
-        &mut self,
-        reg: u8,
-        val: u8,
-    ) -> Result<(), Error<SPI::Error>> {
+    async fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), Error<SPI::Error>> {
         // MSB = 0 → write
         self.spi.write(&[reg & !SPI_READ, val]).await?;
         Ok(())
     }
 
-    async fn read_reg(
-        &mut self,
-        reg: u8,
-    ) -> Result<u8, Error<SPI::Error>> {
+    async fn read_reg(&mut self, reg: u8) -> Result<u8, Error<SPI::Error>> {
         let mut buf = [reg | SPI_READ, 0x00];
         self.spi.transfer_in_place(&mut buf).await?;
         Ok(buf[1])

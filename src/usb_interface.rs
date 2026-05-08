@@ -89,17 +89,10 @@ async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
             (command, remaining) = parser.parse(remaining);
             match command {
                 Ok(Some(command)) => match command {
-                    ShellCommand::Calibrate => match imu::calibrate().await {
-                        Ok(()) => _ = write!(response, "calibration successful"),
-                        Err(imu::CalibrationError::AlreadyInProgress) => {
-                            _ = write!(response, "error: calibration already in progress")
-                        }
-                        Err(imu::CalibrationError::ArmBlock) => {
-                            // NOTE: technically the usb shell already blocks arming so this case
-                            // is not possible
-                            _ = write!(response, "error: drone armed")
-                        }
-                    },
+                    ShellCommand::Calibrate => {
+                        imu::start_calibration();
+                        defmt::info!("calibration started");
+                    }
                     ShellCommand::Get { key } => {
                         _ = config_commands::get_config(&mut response, key).await;
                     }

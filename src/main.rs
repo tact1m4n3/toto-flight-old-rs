@@ -169,6 +169,10 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
         if (now - last).as_micros() >= 1_000_000 {
             let total = (now - last).as_micros();
             let cpu = 100 - (idle_ticks * 100 / total);
+            let gyro = sensors::imu::GYRO.get();
+            defmt::debug!("gyro: {} {} {}", gyro.x, gyro.y, gyro.z);
+            let accel = sensors::imu::ACCEL.get();
+            defmt::debug!("accel: {} {} {}", accel.x, accel.y, accel.z);
             defmt::info!("cpu: {}%", cpu);
             idle_ticks = 0;
             last = now;
