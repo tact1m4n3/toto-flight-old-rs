@@ -10,7 +10,7 @@ use crate::{
 
 // TODO: to be renamed to sensor fusion once we implement eskf
 
-static ATTITUDE: SyncWatch<UnitQuaternion<f32>> = SyncWatch::new(UnitQuaternion::IDENTITY);
+pub static ATTITUDE: SyncWatch<UnitQuaternion<f32>> = SyncWatch::new(UnitQuaternion::IDENTITY);
 
 pub fn init(spawner: SystemSpawner) {
     spawner.high_prio.spawn(task().unwrap());
@@ -35,6 +35,6 @@ async fn task() {
             Err(_) => madgwick.update_gyro(&gyro),
         };
 
-        ATTITUDE.set(attitude.clone());
+        ATTITUDE.set(*attitude);
     }
 }

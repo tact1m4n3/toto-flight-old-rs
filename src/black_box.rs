@@ -10,7 +10,7 @@ use nalgebra::Vector3;
 
 use crate::sensors::{gps, imu, multimeter};
 use crate::utils::SyncWatchReader;
-use crate::{SdCardPeripherals, receiver};
+use crate::{SdCardPeripherals, attitude_estimator, receiver};
 
 mod ardupilot_black_box_logger;
 use ardupilot_black_box_logger as log;
@@ -62,6 +62,7 @@ pub struct Storage {
     link_stats_watcher: SyncWatchReader<'static, receiver::LinkStats>,
     gps_watcher: SyncWatchReader<'static, gps::Data>,
     multimeter_watcher: SyncWatchReader<'static, multimeter::Data>,
+    attitude_watcher: SyncWatchReader<'static, nalgebra::UnitQuaternion<f32>>,
 }
 
 impl Storage {
@@ -118,6 +119,7 @@ impl Storage {
             link_stats_watcher: receiver::LINK_STATS.watcher(),
             gps_watcher: gps::DATA.watcher(),
             multimeter_watcher: multimeter::DATA.watcher(),
+            attitude_watcher: attitude_estimator::ATTITUDE.watcher(),
         })
     }
 
@@ -238,7 +240,20 @@ impl Storage {
                 data.voltage,
                 data.current,
                 data.capacity_used,
-            )?;
+            )?
+        }
+
+        if let Some((quat, timestamp)) = self.attitude_watcher.get_if_changed() {
+            // Convert quaternion to Euler angles (radians) and then to degrees
+            let (roll, pitch, yaw) = quat.euler_angles();
+
+            log::write_attitude(
+                &mut file,
+                timestamp.as_micros(),
+                roll.to_degrees(),
+                pitch.to_degrees(),
+                yaw.to_degrees(),
+            )?
         }
 
         self.active_file = Some(file.to_raw_file());

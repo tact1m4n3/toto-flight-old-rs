@@ -107,6 +107,14 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "QBBBB",
         "TimeUS,UplinkLinkQuality,UplinkRSSI,DownlinkLinkQuality,DownlinkRSSI",
     )?;
+    write_fmt_msg(
+        writer,
+        TYPE_ATTITUDE,
+        size_of::<AttitudeMsg>() as u8,
+        "ATT",
+        "Qfff",
+        "TimeUS,Roll,Pitch,Yaw",
+    )?;
 
     for (id, label) in [
         (b's', "s"),
@@ -187,6 +195,14 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
             fmt_type: TYPE_RC_LINK_STATS,
             units: pack("s----"),
             mults: pack("F----"),
+        },
+        FmtuMsg {
+            sync: SYNC,
+            type_: TYPE_FMTU,
+            time_us: U64::new(t),
+            fmt_type: TYPE_ATTITUDE,
+            units: pack("s-ddd"),
+            mults: pack("F-000"),
         },
     ] {
         write(writer, &fmtu)?;
@@ -354,6 +370,26 @@ pub fn write_rc_link_stats<W: Write>(
     )
 }
 
+pub fn write_attitude<W: Write>(
+    writer: &mut W,
+    time_us: u64,
+    roll: f32,
+    pitch: f32,
+    yaw: f32,
+) -> Result<(), W::Error> {
+    write(
+        writer,
+        &AttitudeMsg {
+            sync: SYNC,
+            type_: TYPE_ATTITUDE,
+            time_us: U64::new(time_us),
+            roll: F32::new(roll),
+            pitch: F32::new(pitch),
+            yaw: F32::new(yaw),
+        },
+    )
+}
+
 fn write<W: Write, T: IntoBytes + Immutable>(writer: &mut W, msg: &T) -> Result<(), W::Error> {
     writer.write_all(msg.as_bytes())
 }
@@ -397,6 +433,7 @@ const TYPE_GPS: u8 = 0x03;
 const TYPE_BATTERY: u8 = 0x04;
 const TYPE_RC_CHANNELS: u8 = 0x05;
 const TYPE_RC_LINK_STATS: u8 = 0x06;
+const TYPE_ATTITUDE: u8 = 0x07;
 // const TYPE_FLIGHT_STATE: u8 = 0x07;
 // const TYPE_NAV_TARGET: u8 = 0x08;
 // const TYPE_MOTOR_OUTPUT: u8 = 0x09;
@@ -546,6 +583,17 @@ struct RcLinkStatsMsg {
     uplink_rssi: u8,
     downlink_link_quality: u8,
     downlink_rssi: u8,
+}
+
+#[derive(IntoBytes, KnownLayout, Immutable)]
+#[repr(C, packed)]
+struct AttitudeMsg {
+    sync: [u8; 2],
+    type_: u8,
+    time_us: U64<LE>,
+    roll: F32<LE>,  // roll in degrees
+    pitch: F32<LE>, // pitch in degrees
+    yaw: F32<LE>,   // yaw in degrees
 }
 
 // #[derive(IntoBytes, KnownLayout, Immutable)]
