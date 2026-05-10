@@ -13,6 +13,9 @@
           "target": "thumbv8m.main-none-eabihf",
           "allTargets": false,
         },
+        "procMacro": {
+          "enable": true,
+        },
       },
     },
   },

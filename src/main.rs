@@ -4,6 +4,7 @@
 // NOTE: used by usb_interface
 #![feature(str_split_whitespace_remainder)]
 
+mod attitude_estimator;
 mod black_box;
 mod drivers;
 mod nav_loop;
@@ -129,6 +130,7 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
 
     receiver::init(spawner, r.receiver);
 
+    attitude_estimator::init(spawner);
     sensors::imu::init(spawner, r.imu).await.unwrap();
     sensors::gps::init(spawner, r.gps);
     sensors::multimeter::init(spawner, i2c_device.clone())

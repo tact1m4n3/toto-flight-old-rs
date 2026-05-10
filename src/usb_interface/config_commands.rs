@@ -6,6 +6,9 @@ use crate::{persistent_config as cfg, utils::pack};
 /// propagate this to the caller; do not panic.
 pub async fn get_config<W: core::fmt::Write>(writer: &mut W, key: &str) -> core::fmt::Result {
     match key {
+        "board_forward_angle" => format_num(writer, cfg::get_board_forward_angle().await),
+        "gyro_bias" => format_num_array(writer, cfg::get_gyro_bias().await),
+        "imu_orientation" => format_num_array(writer, cfg::get_imu_orientation().await),
         "craft_name" => {
             if let Some(value) = cfg::get_craft_name().await {
                 let len = value.iter().position(|&b| b == 0).unwrap_or(16);
@@ -17,8 +20,6 @@ pub async fn get_config<W: core::fmt::Write>(writer: &mut W, key: &str) -> core:
                 write!(writer, "error: not set")
             }
         }
-        "gyro_bias" => format_num_array(writer, cfg::get_gyro_bias().await),
-        "accel_bias" => format_num_array(writer, cfg::get_accel_bias().await),
         "roll_rate_kp" => format_num(writer, cfg::get_roll_rate_kp().await),
         "roll_rate_ki" => format_num(writer, cfg::get_roll_rate_ki().await),
         "roll_rate_kff" => format_num(writer, cfg::get_roll_rate_kff().await),
@@ -68,19 +69,23 @@ enum Error {
 
 async fn inner_set_config(key: &str, value: &str) -> Result<(), Error> {
     match key {
-        "craft_name" => {
-            if value.len() >= 15 {
-                return Err(Error::InvalidValue);
-            }
-            cfg::set_craft_name(pack(value)).await;
+        "board_forward_angle" => {
+            cfg::set_board_forward_angle(parse_num(value)?).await;
             Ok(())
         }
         "gyro_bias" => {
             cfg::set_gyro_bias(parse_num_array(value)?).await;
             Ok(())
         }
-        "accel_bias" => {
-            cfg::set_accel_bias(parse_num_array(value)?).await;
+        "imu_orientation" => {
+            cfg::set_imu_orientation(parse_num_array(value)?).await;
+            Ok(())
+        }
+        "craft_name" => {
+            if value.len() >= 15 {
+                return Err(Error::InvalidValue);
+            }
+            cfg::set_craft_name(pack(value)).await;
             Ok(())
         }
         "roll_rate_kp" => {
@@ -176,7 +181,10 @@ fn parse_num_array<const N: usize, T: Copy + num_traits::Num>(s: &str) -> Result
     Ok(values)
 }
 
-fn format_num<W: core::fmt::Write, T: core::fmt::Display>(writer: &mut W, value: Option<T>) -> core::fmt::Result {
+fn format_num<W: core::fmt::Write, T: core::fmt::Display>(
+    writer: &mut W,
+    value: Option<T>,
+) -> core::fmt::Result {
     match value {
         Some(v) => write!(writer, "{}", v),
         None => write!(writer, "not set"),

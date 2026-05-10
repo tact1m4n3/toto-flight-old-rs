@@ -72,6 +72,8 @@ async fn serial_handler(mut cdc: CdcAcmClass) {
     }
 }
 
+// TODO: usb interface error reporting (e.g. for imu calibration error)
+
 // TODO: currently limited to 64 byte response. We could leverage embedded_io_async::Write but this
 // supports no formatting out of the box.
 async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
@@ -89,9 +91,13 @@ async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
             (command, remaining) = parser.parse(remaining);
             match command {
                 Ok(Some(command)) => match command {
-                    ShellCommand::Calibrate => {
+                    ShellCommand::CalibrateImu => {
                         imu::start_calibration();
-                        defmt::info!("calibration started");
+                        defmt::info!("imu calibration started");
+                    }
+                    ShellCommand::SetImuLevel => {
+                        imu::set_level();
+                        defmt::info!("imu level set");
                     }
                     ShellCommand::Get { key } => {
                         _ = config_commands::get_config(&mut response, key).await;
@@ -157,7 +163,8 @@ impl<const N: usize> ShellParser<N> {
 
         let mut word_iter = line.split_whitespace();
         let command = match word_iter.next() {
-            Some("calibrate") => Some(ShellCommand::Calibrate),
+            Some("calibrate") => Some(ShellCommand::CalibrateImu),
+            Some("set_imu_level") => Some(ShellCommand::SetImuLevel),
             Some("get") => {
                 let Some(key) = word_iter.next() else {
                     return (Err(ShellParserError::InvalidCommand), remaining);
@@ -181,7 +188,8 @@ impl<const N: usize> ShellParser<N> {
 }
 
 enum ShellCommand<'a> {
-    Calibrate,
+    CalibrateImu,
+    SetImuLevel,
     Get { key: &'a str },
     Set { key: &'a str, value: &'a str },
 }

@@ -28,7 +28,8 @@ pub async fn init(p: FlashPeripherals) {
     STORAGE.lock().await.replace(storage);
 }
 
-const BUF_SIZE: usize = 32;
+/// Max key size + max value size aligned to the flash word size.
+const BUF_SIZE: usize = 64;
 
 pub async fn get<T: Copy + for<'a> Value<'a>>(key: Key) -> Option<T> {
     let mut storage = STORAGE.lock().await;
@@ -78,10 +79,11 @@ macro_rules! impl_get_set {
     };
 }
 
-impl_get_set!(craft_name, Key::CraftName, [u8; 16]);
-
+impl_get_set!(board_forward_angle, Key::BoardForwardAngle, f32);
 impl_get_set!(gyro_bias, Key::GyroBias, [f32; 3]);
-impl_get_set!(accel_bias, Key::AccelBias, [f32; 3]);
+impl_get_set!(imu_orientation, Key::ImuOrientation, [f32; 3 * 3]);
+
+impl_get_set!(craft_name, Key::CraftName, [u8; 16]);
 
 impl_get_set!(roll_rate_kp, Key::RollRateKp, f32);
 impl_get_set!(roll_rate_ki, Key::RollRateKi, f32);
@@ -103,27 +105,28 @@ impl_get_set!(right_elevon_mixer_gain, Key::RightElevonMixerGain, [f32; 3]);
 #[derive(Clone, Copy, PartialEq, Eq, num_derive::FromPrimitive)]
 #[repr(u8)]
 pub enum Key {
-    CraftName = 0,
-
+    BoardForwardAngle = 0,
     GyroBias = 1,
-    AccelBias = 2,
+    ImuOrientation = 2,
 
-    RollRateKp = 3,
-    RollRateKi = 4,
-    RollRateKff = 5,
-    PitchRateKp = 6,
-    PitchRateKi = 7,
-    PitchRateKff = 8,
-    YawRateKp = 9,
-    YawRateKi = 10,
-    YawRateKff = 11,
+    CraftName = 40,
 
-    LeftElevonMidPoint = 12,
-    LeftElevonRangeUs = 13,
-    LeftElevonMixerGain = 14,
-    RightElevonMidPoint = 15,
-    RightElevonRangeUs = 16,
-    RightElevonMixerGain = 17,
+    RollRateKp = 80,
+    RollRateKi = 81,
+    RollRateKff = 82,
+    PitchRateKp = 83,
+    PitchRateKi = 84,
+    PitchRateKff = 85,
+    YawRateKp = 86,
+    YawRateKi = 87,
+    YawRateKff = 88,
+
+    LeftElevonMidPoint = 100,
+    LeftElevonRangeUs = 101,
+    LeftElevonMixerGain = 102,
+    RightElevonMidPoint = 103,
+    RightElevonRangeUs = 104,
+    RightElevonMixerGain = 105,
 }
 
 impl sequential_storage::map::Key for Key {

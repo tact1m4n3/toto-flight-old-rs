@@ -4,18 +4,17 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use ahrs::Ahrs;
 use embassy_rp::{gpio, peripherals::SPI1, spi};
 use embassy_time::Delay;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice};
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Rotation3, Vector3};
 
 use crate::{
     ImuPeripherals, Irqs, SystemSpawner,
     drivers::lsm6dsv::{self, Lsm6dsv16b},
     nav_loop::ArmBlocker,
     persistent_config, signals,
-    utils::{NalgebraQuatExt, NalgebraVec3Ext, SyncWatch},
+    utils::{NalgebraVec3Ext, SyncWatch},
 };
 
 type Device = ExclusiveDevice<spi::Spi<'static, SPI1, spi::Async>, gpio::Output<'static>, Delay>;
@@ -26,7 +25,7 @@ pub static GYRO: SyncWatch<Vector3<f32>> = SyncWatch::new(Vector3::ZERO);
 pub static ACCEL: SyncWatch<Vector3<f32>> = SyncWatch::new(Vector3::ZERO);
 
 static START_CALIBRATION: AtomicBool = AtomicBool::new(false);
-static LEVEL: AtomicBool = AtomicBool::new(false);
+static MARK_LEVEL: AtomicBool = AtomicBool::new(false);
 
 signals! {
     INTERRUPT_SIGNAL: ();
@@ -34,6 +33,10 @@ signals! {
 
 pub fn start_calibration() {
     START_CALIBRATION.store(true, Ordering::Relaxed);
+}
+
+pub fn set_level() {
+    MARK_LEVEL.store(true, Ordering::Relaxed);
 }
 
 pub async fn init(spawner: SystemSpawner, p: ImuPeripherals) -> Result<(), Error> {
@@ -62,22 +65,13 @@ async fn main_task(mut imu: Imu) {
         .await
         .unwrap_or([0.0; 3])
         .into();
-    let mut accel_bias: Vector3<f32> = persistent_config::get_accel_bias()
-        .await
-        .unwrap_or([0.0; 3])
-        .into();
+    let mut imu_rot: Matrix3<f32> = match persistent_config::get_imu_orientation().await {
+        Some(raw) => Matrix3::from_column_slice(&raw),
+        None => Matrix3::identity(),
+    };
 
     loop {
         INTERRUPT_SIGNAL.wait().await;
-
-        let should_start_calibration = START_CALIBRATION.load(Ordering::Relaxed);
-        if should_start_calibration && let Ok(_arm_guard) = ArmBlocker::new() {
-            match calibrate(&mut imu).await {
-                Ok(biases) => (gyro_bias, accel_bias) = biases,
-                Err(_) => defmt::error!("calibration failed"),
-            }
-            START_CALIBRATION.store(false, Ordering::Relaxed);
-        };
 
         let data = match imu.read().await {
             Ok(data) => data,
@@ -87,19 +81,33 @@ async fn main_task(mut imu: Imu) {
             }
         };
 
-        let unbiased_gyro = Vector3::from(data.gyro);
-        let unbiased_accel = Vector3::from(data.accel);
+        let gyro = imu_rot * Vector3::from(data.gyro);
+        let accel = imu_rot * Vector3::from(data.accel);
 
-        let gyro = (unbiased_gyro - gyro_bias) * f32::consts::PI / 180.0;
-        let accel = (unbiased_accel - accel_bias) * 9.80665;
+        let gyro = (gyro - gyro_bias) * f32::consts::PI / 180.0;
+        let accel = accel * 9.80665;
 
         GYRO.set(gyro);
         ACCEL.set(accel);
+
+        let should_start_calibration = START_CALIBRATION.load(Ordering::Relaxed);
+        if should_start_calibration && let Ok(_arm_guard) = ArmBlocker::new() {
+            match calibrate(&mut imu).await {
+                Ok((new_gyro_bias, new_imu_rot)) => {
+                    gyro_bias = new_gyro_bias;
+                    imu_rot = new_imu_rot;
+                }
+                Err(_) => defmt::error!("calibration failed"),
+            }
+            START_CALIBRATION.store(false, Ordering::Relaxed);
+        };
     }
 }
 
-async fn calibrate(imu: &mut Imu) -> Result<(Vector3<f32>, Vector3<f32>), Error> {
-    const CALIBRATION_SAMPLES: usize = 500;
+// TODO: better accelerometer calibration, currently we don't calculate any bias
+// or scale for it
+async fn calibrate(imu: &mut Imu) -> Result<(Vector3<f32>, Matrix3<f32>), Error> {
+    const CALIBRATION_SAMPLES: usize = 100;
 
     defmt::debug!("calibration started");
 
@@ -111,19 +119,33 @@ async fn calibrate(imu: &mut Imu) -> Result<(Vector3<f32>, Vector3<f32>), Error>
     }
     let (gyro_bias, accel_bias) = calibrator.compute_bias();
 
+    let board_forward_angle = persistent_config::get_board_forward_angle()
+        .await
+        .unwrap_or(0.0)
+        .to_radians();
+
+    let up = accel_bias.normalize();
+    let down = -up;
+
+    let reference = if down.x.abs() < 0.9 {
+        Vector3::x()
+    } else {
+        Vector3::y()
+    };
+
+    let board_rotation = Rotation3::new(up * board_forward_angle);
+
+    let east = board_rotation * down.cross(&reference).normalize();
+    let north = east.cross(&down).normalize();
+    let rot = Matrix3::from_columns(&[north, east, down]);
+
     defmt::debug!("calibration completed");
     defmt::debug!("gyro bias: {} {} {}", gyro_bias.x, gyro_bias.y, gyro_bias.z);
-    defmt::debug!(
-        "accel bias: {} {} {}",
-        accel_bias.x,
-        accel_bias.y,
-        accel_bias.z
-    );
 
     persistent_config::set_gyro_bias(gyro_bias.into()).await;
-    persistent_config::set_accel_bias(accel_bias.into()).await;
+    persistent_config::set_imu_orientation(*rot.as_slice().as_array::<9>().unwrap()).await;
 
-    Ok((gyro_bias, accel_bias))
+    Ok((gyro_bias, rot))
 }
 
 #[embassy_executor::task]
