@@ -14,20 +14,15 @@ mod sensors;
 mod usb_interface;
 mod utils;
 
-use core::cell::RefCell;
-
 use assign_resources::assign_resources;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner};
 use embassy_rp::{
     Peri, dma, gpio, i2c,
     interrupt::{self, InterruptExt},
-    multicore, peripherals, uart, usb,
+    peripherals, uart, usb,
 };
-use embassy_sync::{
-    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
-    mutex::Mutex as AsyncMutex,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
 use embassy_time::Instant;
 use static_cell::StaticCell;
 
@@ -35,9 +30,6 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 assign_resources! {
-    multicore: MulticorePeripherals {
-        core1: CORE1,
-    },
     led: LedPeripherals {
         pin: PIN_45,
     },
@@ -127,23 +119,6 @@ fn main() -> ! {
 
 #[embassy_executor::task]
 pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
-    let storage = match black_box::Storage::new(r.sd_card) {
-        Ok(storage) => Some(storage),
-        Err(err) => {
-            defmt::warn!("failed to initialize black box logging: {}", err);
-            None
-        }
-    };
-
-    critical_section::with(|cs| *STORAGE.borrow(cs).borrow_mut() = storage);
-
-    static STACK: StaticCell<multicore::Stack<4096>> = StaticCell::new();
-    multicore::spawn_core1(
-        r.multicore.core1,
-        STACK.init(multicore::Stack::new()),
-        core1_main,
-    );
-
     persistent_config::init(r.flash).await;
 
     let i2c_device = init_i2c(r.i2c_bus);
@@ -162,13 +137,31 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
 
     usb_interface::init(spawner, r.usb);
 
+    let mut storage = match black_box::Storage::new(r.sd_card) {
+        Ok(storage) => Some(storage),
+        Err(err) => {
+            defmt::warn!("failed to initialize black box logging: {}", err);
+            None
+        }
+    };
+
     let mut last_blink = Instant::now();
     let mut idle_ticks: u64 = 0;
 
     let mut idle_led = gpio::Output::new(r.led.pin, gpio::Level::Low);
     loop {
         let before = Instant::now();
-        cortex_m::asm::wfe();
+
+        if let Some(storage) = storage.as_mut() {
+            match storage.poll() {
+                Ok(()) => (),
+                Err(err) => {
+                    defmt::warn!("black box logging error: {}", err);
+                }
+            }
+        }
+
+        cortex_m::asm::wfi();
 
         let now = Instant::now();
         idle_ticks += (now - before).as_micros();
@@ -182,27 +175,6 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
             last_blink = now;
             idle_led.toggle();
         }
-    }
-}
-
-static STORAGE: Mutex<CriticalSectionRawMutex, RefCell<Option<black_box::Storage>>> =
-    Mutex::new(RefCell::new(None));
-
-fn core1_main() -> ! {
-    if let Some(mut storage) = STORAGE.lock(|storage| storage.borrow_mut().take()) {
-        loop {
-            match storage.poll() {
-                Ok(()) => (),
-                Err(err) => {
-                    defmt::warn!("black box logging error: {}", err);
-                    break;
-                }
-            }
-        }
-    }
-
-    loop {
-        cortex_m::asm::wfe();
     }
 }
 

@@ -4,6 +4,7 @@ use core::{fmt::Write, ops::ControlFlow};
 use embassy_rp::{gpio, peripherals::SPI0, spi};
 use embassy_time::{Delay, Duration, Instant};
 use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
+use embedded_sdmmc::sdcard::spi::AcquireOpts;
 use embedded_sdmmc::{RawDirectory, RawFile};
 use heapless::String;
 use nalgebra::Vector3;
@@ -73,7 +74,14 @@ impl Storage {
         let spi_cs = gpio::Output::new(p.cs_pin, gpio::Level::High);
         let spi_dev = ExclusiveDevice::new_no_delay(spi, spi_cs).unwrap(); // NOTE: can't fail
 
-        let sdcard = SdCard::new(spi_dev, Delay);
+        let sdcard = SdCard::new_with_options(
+            spi_dev,
+            Delay,
+            AcquireOpts {
+                use_crc: true,
+                acquire_retries: 5,
+            },
+        );
 
         // this also initializes the sdcard
         defmt::info!("sd card size: {}", sdcard.num_bytes()?);
@@ -135,7 +143,7 @@ impl Storage {
         }
 
         if NEW_FILE_FLAG.swap(false, Ordering::Relaxed)
-            && let Some(raw_file) = self.active_file
+            && let Some(raw_file) = self.active_file.take()
         {
             let file = raw_file.to_file(&self.volume_manager);
             file.close()?;
