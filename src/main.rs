@@ -4,7 +4,6 @@
 // NOTE: used by usb_interface
 #![feature(str_split_whitespace_remainder)]
 
-mod attitude_estimator;
 mod black_box;
 mod drivers;
 mod nav_loop;
@@ -15,15 +14,20 @@ mod sensors;
 mod usb_interface;
 mod utils;
 
+use core::cell::RefCell;
+
 use assign_resources::assign_resources;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner};
 use embassy_rp::{
     Peri, dma, gpio, i2c,
     interrupt::{self, InterruptExt},
-    peripherals, uart, usb,
+    multicore, peripherals, uart, usb,
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::{
+    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
+    mutex::Mutex as AsyncMutex,
+};
 use embassy_time::Instant;
 use static_cell::StaticCell;
 
@@ -94,23 +98,25 @@ fn main() -> ! {
 
     let r = split_resources!(p);
 
-    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P3); // realtime
-    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P1); // high
-    interrupt::SWI_IRQ_2.set_priority(interrupt::Priority::P0); // low
+    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P2); // realtime
+    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P0); // default
 
+    // interrupts used by realtime tasks
     interrupt::TIMER0_IRQ_0.set_priority(interrupt::Priority::P3);
     interrupt::DMA_IRQ_0.set_priority(interrupt::Priority::P3);
     interrupt::IO_IRQ_BANK0.set_priority(interrupt::Priority::P3);
 
+    // uart reader interrupts
     interrupt::UART0_IRQ.set_priority(interrupt::Priority::P1);
     interrupt::UART1_IRQ.set_priority(interrupt::Priority::P1);
-    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P0);
+
+    // interrupts used by default tasks
+    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P1);
     interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P1);
 
     let spawner = SystemSpawner {
         realtime: REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0),
-        high_prio: HIGH_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1),
-        low_prio: LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_2),
+        default: DEFAULT_EXECUTOR.start(interrupt::SWI_IRQ_1),
     };
 
     static IDLE_EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -121,6 +127,23 @@ fn main() -> ! {
 
 #[embassy_executor::task]
 pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
+    let storage = match black_box::Storage::new(r.sd_card) {
+        Ok(storage) => Some(storage),
+        Err(err) => {
+            defmt::warn!("failed to initialize black box logging: {}", err);
+            None
+        }
+    };
+
+    critical_section::with(|cs| *STORAGE.borrow(cs).borrow_mut() = storage);
+
+    static STACK: StaticCell<multicore::Stack<4096>> = StaticCell::new();
+    multicore::spawn_core1(
+        r.multicore.core1,
+        STACK.init(multicore::Stack::new()),
+        core1_main,
+    );
+
     persistent_config::init(r.flash).await;
 
     let i2c_device = init_i2c(r.i2c_bus);
@@ -130,61 +153,61 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
 
     receiver::init(spawner, r.receiver);
 
-    attitude_estimator::init(spawner);
     sensors::imu::init(spawner, r.imu).await.unwrap();
     sensors::gps::init(spawner, r.gps);
     sensors::multimeter::init(spawner, i2c_device.clone())
         .await
         .unwrap();
+    sensors::fusion::init(spawner);
 
     usb_interface::init(spawner, r.usb);
 
-    let mut maybe_storage = match black_box::Storage::new(r.sd_card) {
-        Ok(storage) => Some(storage),
-        Err(err) => {
-            defmt::warn!("failed to initialize black box logging: {}", err);
-            None
-        }
-    };
-
-    let mut last = Instant::now();
+    let mut last_blink = Instant::now();
     let mut idle_ticks: u64 = 0;
 
     let mut idle_led = gpio::Output::new(r.led.pin, gpio::Level::Low);
     loop {
         let before = Instant::now();
-
-        if let Some(mut storage) = maybe_storage.take() {
-            match storage.poll() {
-                Ok(()) => maybe_storage = Some(storage),
-                Err(err) => {
-                    defmt::warn!("black box logging error: {}", err);
-                }
-            }
-        }
-
         cortex_m::asm::wfe();
 
-        idle_ticks += (Instant::now() - before).as_micros();
-
         let now = Instant::now();
-        if (now - last).as_micros() >= 1_000_000 {
-            let total = (now - last).as_micros();
+        idle_ticks += (now - before).as_micros();
+
+        let elapsed_since_last_blink = now - last_blink;
+        if elapsed_since_last_blink.as_micros() >= 1_000_000 {
+            let total = elapsed_since_last_blink.as_micros();
             let cpu = 100 - (idle_ticks * 100 / total);
-            let gyro = sensors::imu::GYRO.get();
-            defmt::debug!("gyro: {} {} {}", gyro.x, gyro.y, gyro.z);
-            let accel = sensors::imu::ACCEL.get();
-            defmt::debug!("accel: {} {} {}", accel.x, accel.y, accel.z);
             defmt::info!("cpu: {}%", cpu);
             idle_ticks = 0;
-            last = now;
+            last_blink = now;
             idle_led.toggle();
         }
     }
 }
 
+static STORAGE: Mutex<CriticalSectionRawMutex, RefCell<Option<black_box::Storage>>> =
+    Mutex::new(RefCell::new(None));
+
+fn core1_main() -> ! {
+    if let Some(mut storage) = STORAGE.lock(|storage| storage.borrow_mut().take()) {
+        loop {
+            match storage.poll() {
+                Ok(()) => (),
+                Err(err) => {
+                    defmt::warn!("black box logging error: {}", err);
+                    break;
+                }
+            }
+        }
+    }
+
+    loop {
+        cortex_m::asm::wfe();
+    }
+}
+
 type I2cBus = i2c::I2c<'static, I2C0, i2c::Async>;
-type SharedI2cBus = Mutex<CriticalSectionRawMutex, I2cBus>;
+type SharedI2cBus = AsyncMutex<CriticalSectionRawMutex, I2cBus>;
 pub type SharedI2cDevice = I2cDevice<'static, CriticalSectionRawMutex, I2cBus>;
 
 fn init_i2c(p: I2cBusPeripherals) -> SharedI2cDevice {
@@ -194,19 +217,17 @@ fn init_i2c(p: I2cBusPeripherals) -> SharedI2cDevice {
     config.scl_pullup = false;
     let i2c_bus = i2c::I2c::new_async(p.i2c, p.scl_pin, p.sda_pin, Irqs, config);
     static I2C_BUS: StaticCell<SharedI2cBus> = StaticCell::new();
-    I2cDevice::new(I2C_BUS.init(Mutex::new(i2c_bus)))
+    I2cDevice::new(I2C_BUS.init(AsyncMutex::new(i2c_bus)))
 }
 
 #[derive(Clone, Copy)]
 pub struct SystemSpawner {
     pub realtime: SendSpawner,
-    pub high_prio: SendSpawner,
-    pub low_prio: SendSpawner,
+    pub default: SendSpawner,
 }
 
 static REALTIME_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-static HIGH_PRIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-static LOW_PRIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
+static DEFAULT_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
 #[cortex_m_rt::interrupt]
 fn SWI_IRQ_0() {
@@ -215,12 +236,7 @@ fn SWI_IRQ_0() {
 
 #[cortex_m_rt::interrupt]
 fn SWI_IRQ_1() {
-    unsafe { HIGH_PRIO_EXECUTOR.on_interrupt() };
-}
-
-#[cortex_m_rt::interrupt]
-fn SWI_IRQ_2() {
-    unsafe { LOW_PRIO_EXECUTOR.on_interrupt() };
+    unsafe { DEFAULT_EXECUTOR.on_interrupt() };
 }
 
 embassy_rp::bind_interrupts!(pub struct Irqs {
@@ -233,7 +249,8 @@ embassy_rp::bind_interrupts!(pub struct Irqs {
                  dma::InterruptHandler<DMA_CH2>,
                  dma::InterruptHandler<DMA_CH3>,
                  dma::InterruptHandler<DMA_CH4>,
-                 dma::InterruptHandler<DMA_CH5>;
+                 dma::InterruptHandler<DMA_CH5>,
+                 dma::InterruptHandler<DMA_CH6>;
 });
 
 #[defmt::panic_handler]

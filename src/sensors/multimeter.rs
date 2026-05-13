@@ -47,7 +47,7 @@ pub async fn init(
         .commit()
         .await; // TODO: Error is ignored here by the driver.
 
-    spawner.low_prio.spawn(task(ina226).unwrap());
+    spawner.default.spawn(task(ina226).unwrap());
 
     Ok(())
 }
@@ -72,10 +72,15 @@ async fn task(mut ina226: INA226<SharedI2cDevice, ina226_tp::Operational>) {
         total_current += ((prev_current + instant_current) / 2.0) * DT * 3600.0;
         prev_current = instant_current;
 
-        DATA.set(Data {
-            voltage: instant_voltage as f32,
-            current: instant_current as f32,
-            capacity_used: total_current as f32,
+        critical_section::with(|cs| {
+            DATA.set(
+                cs,
+                Data {
+                    voltage: instant_voltage as f32,
+                    current: instant_current as f32,
+                    capacity_used: total_current as f32,
+                },
+            );
         });
     }
 }

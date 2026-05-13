@@ -11,7 +11,7 @@ mod config_commands;
 
 pub fn init(spawner: SystemSpawner, p: UsbPeripherals) {
     let driver = usb::Driver::new(p.usb, Irqs);
-    spawner.low_prio.spawn(usb_task(driver).unwrap());
+    spawner.default.spawn(usb_task(driver).unwrap());
 }
 
 type Driver = usb::Driver<'static, USB>;
@@ -95,10 +95,6 @@ async fn shell(cdc: &mut CdcAcmClass) -> Result<(), EndpointError> {
                         imu::start_calibration();
                         defmt::info!("imu calibration started");
                     }
-                    ShellCommand::SetImuLevel => {
-                        imu::set_level();
-                        defmt::info!("imu level set");
-                    }
                     ShellCommand::Get { key } => {
                         _ = config_commands::get_config(&mut response, key).await;
                     }
@@ -164,7 +160,6 @@ impl<const N: usize> ShellParser<N> {
         let mut word_iter = line.split_whitespace();
         let command = match word_iter.next() {
             Some("calibrate") => Some(ShellCommand::CalibrateImu),
-            Some("set_imu_level") => Some(ShellCommand::SetImuLevel),
             Some("get") => {
                 let Some(key) = word_iter.next() else {
                     return (Err(ShellParserError::InvalidCommand), remaining);
@@ -189,7 +184,6 @@ impl<const N: usize> ShellParser<N> {
 
 enum ShellCommand<'a> {
     CalibrateImu,
-    SetImuLevel,
     Get { key: &'a str },
     Set { key: &'a str, value: &'a str },
 }

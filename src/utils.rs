@@ -1,5 +1,6 @@
 use core::{cell::RefCell, ops::Range};
 
+use critical_section::CriticalSection;
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
 use nalgebra::{Quaternion, UnitQuaternion, Vector3};
@@ -109,28 +110,24 @@ impl<T: Copy> SyncWatch<T> {
         }
     }
 
-    pub fn get(&self) -> T {
-        self.state.lock(|state| state.borrow().value)
+    pub fn get(&self, cs: CriticalSection) -> T {
+        self.state.borrow(cs).borrow().value
     }
 
-    pub fn get_with_timestamp(&self) -> (T, Instant) {
-        self.state.lock(|state| {
-            let state = state.borrow();
-            (state.value, state.update_timestamp)
-        })
+    pub fn get_with_timestamp(&self, cs: CriticalSection) -> (T, Instant) {
+        let state = self.state.borrow(cs).borrow();
+        (state.value, state.update_timestamp)
     }
 
-    pub fn set(&self, new_value: T) {
-        self.set_with_timestamp(new_value, Instant::now());
+    pub fn set(&self, cs: CriticalSection, new_value: T) {
+        self.set_with_timestamp(cs, new_value, Instant::now());
     }
 
-    pub fn set_with_timestamp(&self, new_value: T, timestamp: Instant) {
-        self.state.lock(|state| {
-            *state.borrow_mut() = SyncWatchState {
-                value: new_value,
-                update_timestamp: timestamp,
-            };
-        });
+    pub fn set_with_timestamp(&self, cs: CriticalSection, new_value: T, timestamp: Instant) {
+        *self.state.borrow(cs).borrow_mut() = SyncWatchState {
+            value: new_value,
+            update_timestamp: timestamp,
+        };
     }
 }
 
@@ -140,17 +137,15 @@ pub struct SyncWatchReader<'a, T: Copy> {
 }
 
 impl<'a, T: Copy> SyncWatchReader<'a, T> {
-    pub fn get_if_changed(&mut self) -> Option<(T, Instant)> {
-        self.state.lock(|state| {
-            let state = state.borrow();
-            if let Some(last_read_timestamp) = self.last_read_timestamp
-                && state.update_timestamp <= last_read_timestamp
-            {
-                return None;
-            }
-            self.last_read_timestamp = Some(state.update_timestamp);
-            Some((state.value, state.update_timestamp))
-        })
+    pub fn get_if_changed(&mut self, cs: CriticalSection) -> Option<(T, Instant)> {
+        let state = self.state.borrow(cs).borrow();
+        if let Some(last_read_timestamp) = self.last_read_timestamp
+            && state.update_timestamp <= last_read_timestamp
+        {
+            return None;
+        }
+        self.last_read_timestamp = Some(state.update_timestamp);
+        Some((state.value, state.update_timestamp))
     }
 }
 

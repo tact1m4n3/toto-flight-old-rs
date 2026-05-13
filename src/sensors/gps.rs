@@ -33,65 +33,68 @@ pub fn init(spawner: SystemSpawner, p: GpsPeripherals) {
 
     let pps_pin = gpio::Input::new(p.pps_pin, gpio::Pull::None);
 
-    spawner.high_prio.spawn(main_task(uart).unwrap());
-    spawner.high_prio.spawn(pps_listener_task(pps_pin).unwrap());
+    spawner.default.spawn(main_task(uart).unwrap());
+    spawner.default.spawn(pps_listener_task(pps_pin).unwrap());
 }
 
 #[embassy_executor::task]
 async fn main_task(mut uart_rx: uart::BufferedUartRx) {
     let mut measurement_delay = Duration::from_millis(80); // default measurement delay
 
-    let mut buffer = [0u8; 128];
+    let mut buf = [0u8; 128];
     let mut parser: ublox::Parser<FixedBuffer<128>> = Parser::new_fixed();
     loop {
-        match uart_rx.read(&mut buffer).await {
-            Ok(n) => {
-                let mut packet_iter = parser.consume_ubx(&buffer[..n]);
-                while let Some(result) = packet_iter.next() {
-                    match result {
-                        Ok(packet) => {
-                            let UbxPacket::Proto33(ref packet) = packet;
-
-                            #[allow(clippy::single_match)]
-                            match packet {
-                                PacketRef::NavPvt(pvt) => {
-                                    let now = Instant::now();
-                                    if let Some(pps_instant) =
-                                        PPS_TIMESTAMP.lock(|pps_timestamp| pps_timestamp.take())
-                                    {
-                                        measurement_delay = now - pps_instant;
-                                    }
-
-                                    let timestamp = now.saturating_sub(measurement_delay);
-                                    let data = Data {
-                                        latitude: pvt.latitude(),
-                                        longitude: pvt.longitude(),
-                                        altitude: pvt.height_msl() as f32,
-                                        h_acc: pvt.horizontal_accuracy() as f32,
-                                        v_acc: pvt.vertical_accuracy() as f32,
-                                        speed: pvt.ground_speed_2d() as f32,
-                                        heading: pvt.heading_motion() as f32,
-                                        num_sat: pvt.num_satellites(),
-                                        hdop: pvt.pdop() as f32,
-                                        fix_type: pvt.fix_type().into(),
-                                        vertical_velocity: pvt.vel_down() as f32,
-                                    };
-
-                                    DATA.set_with_timestamp(data, timestamp);
-                                }
-                                _ => {}
-                            }
-                        }
-                        Err(_) => {
-                            defmt::warn!("gps: failed to parse packet");
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                defmt::warn!("gps: failed to read uart");
+        let n = match uart_rx.read(&mut buf).await {
+            Ok(n) => n,
+            Err(err) => {
+                defmt::warn!("gps: failed to read from uart: {}", err);
+                continue;
             }
         };
+
+        let mut packet_iter = parser.consume_ubx(&buf[..n]);
+        while let Some(result) = packet_iter.next() {
+            match result {
+                Ok(packet) => {
+                    let UbxPacket::Proto33(ref packet) = packet;
+
+                    #[allow(clippy::single_match)]
+                    match packet {
+                        PacketRef::NavPvt(pvt) => {
+                            let now = Instant::now();
+                            if let Some(pps_instant) =
+                                PPS_TIMESTAMP.lock(|pps_timestamp| pps_timestamp.take())
+                            {
+                                measurement_delay = now - pps_instant;
+                            }
+
+                            let timestamp = now.saturating_sub(measurement_delay);
+                            let data = Data {
+                                latitude: pvt.latitude(),
+                                longitude: pvt.longitude(),
+                                altitude: pvt.height_msl() as f32,
+                                h_acc: pvt.horizontal_accuracy() as f32,
+                                v_acc: pvt.vertical_accuracy() as f32,
+                                speed: pvt.ground_speed_2d() as f32,
+                                heading: pvt.heading_motion() as f32,
+                                num_sat: pvt.num_satellites(),
+                                hdop: pvt.pdop() as f32,
+                                fix_type: pvt.fix_type().into(),
+                                vertical_velocity: pvt.vel_down() as f32,
+                            };
+
+                            critical_section::with(|cs| {
+                                DATA.set_with_timestamp(cs, data, timestamp);
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                Err(_) => {
+                    defmt::warn!("gps: failed to parse packet");
+                }
+            }
+        }
     }
 }
 

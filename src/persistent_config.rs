@@ -9,13 +9,11 @@ use crate::{FlashPeripherals, Irqs};
 
 const FLASH_STORAGE_RANGE: Range<u32> = 15 * 1024 * 1024..16 * 1024 * 1024; // store in the last megabyte
 const FLASH_SIZE: usize = 16 * 1024 * 1024;
-const FLASH_WORD_SIZE: usize = 4;
 
 type Flash = flash::Flash<'static, FLASH, flash::Async, FLASH_SIZE>;
 type MapStorage =
     sequential_storage::map::MapStorage<Key, Flash, sequential_storage::cache::NoCache>;
 
-// static FLUSH: AtomicBool = AtomicBool::new(false);
 static STORAGE: Mutex<CriticalSectionRawMutex, Option<MapStorage>> = Mutex::new(None);
 
 pub async fn init(p: FlashPeripherals) {
@@ -81,6 +79,7 @@ macro_rules! impl_get_set {
 
 impl_get_set!(board_forward_angle, Key::BoardForwardAngle, f32);
 impl_get_set!(gyro_bias, Key::GyroBias, [f32; 3]);
+impl_get_set!(accel_bias, Key::AccelBias, [f32; 3]);
 impl_get_set!(imu_orientation, Key::ImuOrientation, [f32; 3 * 3]);
 
 impl_get_set!(craft_name, Key::CraftName, [u8; 16]);
@@ -107,7 +106,8 @@ impl_get_set!(right_elevon_mixer_gain, Key::RightElevonMixerGain, [f32; 3]);
 pub enum Key {
     BoardForwardAngle = 0,
     GyroBias = 1,
-    ImuOrientation = 2,
+    AccelBias = 2,
+    ImuOrientation = 3,
 
     CraftName = 40,
 

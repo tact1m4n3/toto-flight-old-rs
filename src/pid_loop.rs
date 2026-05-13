@@ -109,8 +109,8 @@ async fn pid_loop(mut output_pwms: OutputPwms, state: &GuardedRefCell<State>) {
         ticker.next().await;
 
         state.guarded_mut(|state| {
-            let gyro = imu::GYRO.get();
-            let command = nav_loop::COMMAND.get();
+            let (gyro, command) =
+                critical_section::with(|cs| (imu::GYRO.get(cs), nav_loop::COMMAND.get(cs)));
 
             match command {
                 // TODO: should we set idle to a fixed value, or keep things this way?

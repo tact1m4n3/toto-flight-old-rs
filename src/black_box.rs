@@ -10,7 +10,7 @@ use nalgebra::Vector3;
 
 use crate::sensors::{gps, imu, multimeter};
 use crate::utils::SyncWatchReader;
-use crate::{SdCardPeripherals, attitude_estimator, receiver};
+use crate::{SdCardPeripherals, receiver, sensors::fusion};
 
 mod ardupilot_black_box_logger;
 use ardupilot_black_box_logger as log;
@@ -80,7 +80,7 @@ impl Storage {
 
         // up the frequency after initialization
         let mut config = spi::Config::default();
-        config.frequency = 16_000_000;
+        config.frequency = 12_000_000;
         sdcard.spi(|dev| dev.bus_mut().set_config(&config));
 
         let volume_manager = VolumeManager::new_with_limits(sdcard, DummyTimesource, 0);
@@ -119,7 +119,7 @@ impl Storage {
             link_stats_watcher: receiver::LINK_STATS.watcher(),
             gps_watcher: gps::DATA.watcher(),
             multimeter_watcher: multimeter::DATA.watcher(),
-            attitude_watcher: attitude_estimator::ATTITUDE.watcher(),
+            attitude_watcher: fusion::ATTITUDE.watcher(),
         })
     }
 
@@ -194,19 +194,27 @@ impl Storage {
             .unwrap()
             .to_file(&self.volume_manager);
 
-        if let Some((gyro, timestamp)) = self.gyro_watcher.get_if_changed() {
+        if let Some((gyro, timestamp)) =
+            critical_section::with(|cs| self.gyro_watcher.get_if_changed(cs))
+        {
             log::write_gyro(&mut file, timestamp.as_micros(), gyro)?;
         }
 
-        if let Some((accel, timestamp)) = self.accel_watcher.get_if_changed() {
+        if let Some((accel, timestamp)) =
+            critical_section::with(|cs| self.accel_watcher.get_if_changed(cs))
+        {
             log::write_accel(&mut file, timestamp.as_micros(), accel)?;
         }
 
-        if let Some((channels, timestamp)) = self.channels_watcher.get_if_changed() {
+        if let Some((channels, timestamp)) =
+            critical_section::with(|cs| self.channels_watcher.get_if_changed(cs))
+        {
             log::write_rc_channels(&mut file, timestamp.as_micros(), &channels)?;
         }
 
-        if let Some((stats, timestamp)) = self.link_stats_watcher.get_if_changed() {
+        if let Some((stats, timestamp)) =
+            critical_section::with(|cs| self.link_stats_watcher.get_if_changed(cs))
+        {
             log::write_rc_link_stats(
                 &mut file,
                 timestamp.as_micros(),
@@ -217,7 +225,9 @@ impl Storage {
             )?;
         }
 
-        if let Some((data, timestamp)) = self.gps_watcher.get_if_changed() {
+        if let Some((data, timestamp)) =
+            critical_section::with(|cs| self.gps_watcher.get_if_changed(cs))
+        {
             log::write_gps(
                 &mut file,
                 timestamp.as_micros(),
@@ -233,7 +243,9 @@ impl Storage {
             )?;
         }
 
-        if let Some((data, timestamp)) = self.multimeter_watcher.get_if_changed() {
+        if let Some((data, timestamp)) =
+            critical_section::with(|cs| self.multimeter_watcher.get_if_changed(cs))
+        {
             log::write_bat(
                 &mut file,
                 timestamp.as_micros(),
@@ -243,7 +255,9 @@ impl Storage {
             )?
         }
 
-        if let Some((quat, timestamp)) = self.attitude_watcher.get_if_changed() {
+        if let Some((quat, timestamp)) =
+            critical_section::with(|cs| self.attitude_watcher.get_if_changed(cs))
+        {
             // Convert quaternion to Euler angles (radians) and then to degrees
             let (roll, pitch, yaw) = quat.euler_angles();
 
@@ -255,6 +269,8 @@ impl Storage {
                 yaw.to_degrees(),
             )?
         }
+
+        file.flush()?;
 
         self.active_file = Some(file.to_raw_file());
 

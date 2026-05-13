@@ -25,7 +25,6 @@ pub static GYRO: SyncWatch<Vector3<f32>> = SyncWatch::new(Vector3::ZERO);
 pub static ACCEL: SyncWatch<Vector3<f32>> = SyncWatch::new(Vector3::ZERO);
 
 static START_CALIBRATION: AtomicBool = AtomicBool::new(false);
-static MARK_LEVEL: AtomicBool = AtomicBool::new(false);
 
 signals! {
     INTERRUPT_SIGNAL: ();
@@ -33,10 +32,6 @@ signals! {
 
 pub fn start_calibration() {
     START_CALIBRATION.store(true, Ordering::Relaxed);
-}
-
-pub fn set_level() {
-    MARK_LEVEL.store(true, Ordering::Relaxed);
 }
 
 pub async fn init(spawner: SystemSpawner, p: ImuPeripherals) -> Result<(), Error> {
@@ -65,6 +60,10 @@ async fn main_task(mut imu: Imu) {
         .await
         .unwrap_or([0.0; 3])
         .into();
+    let mut accel_bias: Vector3<f32> = persistent_config::get_accel_bias()
+        .await
+        .unwrap_or([0.0; 3])
+        .into();
     let mut imu_rot: Matrix3<f32> = match persistent_config::get_imu_orientation().await {
         Some(raw) => Matrix3::from_column_slice(&raw),
         None => Matrix3::identity(),
@@ -81,20 +80,23 @@ async fn main_task(mut imu: Imu) {
             }
         };
 
-        let gyro = imu_rot * Vector3::from(data.gyro);
-        let accel = imu_rot * Vector3::from(data.accel);
+        let gyro = imu_rot * Vector3::from(data.gyro) - gyro_bias;
+        let accel = imu_rot * Vector3::from(data.accel) - accel_bias;
 
-        let gyro = (gyro - gyro_bias) * f32::consts::PI / 180.0;
-        let accel = accel * 9.80665;
+        let gyro = gyro * f32::consts::PI / 180.0; // to rad/s from dps
+        let accel = accel * 9.80665; // to m/s^2 from g
 
-        GYRO.set(gyro);
-        ACCEL.set(accel);
+        critical_section::with(|cs| {
+            GYRO.set(cs, gyro);
+            ACCEL.set(cs, accel);
+        });
 
         let should_start_calibration = START_CALIBRATION.load(Ordering::Relaxed);
         if should_start_calibration && let Ok(_arm_guard) = ArmBlocker::new() {
             match calibrate(&mut imu).await {
-                Ok((new_gyro_bias, new_imu_rot)) => {
+                Ok((new_gyro_bias, new_accel_bias, new_imu_rot)) => {
                     gyro_bias = new_gyro_bias;
+                    accel_bias = new_accel_bias;
                     imu_rot = new_imu_rot;
                 }
                 Err(_) => defmt::error!("calibration failed"),
@@ -106,25 +108,28 @@ async fn main_task(mut imu: Imu) {
 
 // TODO: better accelerometer calibration, currently we don't calculate any bias
 // or scale for it
-async fn calibrate(imu: &mut Imu) -> Result<(Vector3<f32>, Matrix3<f32>), Error> {
-    const CALIBRATION_SAMPLES: usize = 100;
+async fn calibrate(imu: &mut Imu) -> Result<(Vector3<f32>, Vector3<f32>, Matrix3<f32>), Error> {
+    const CALIBRATION_SAMPLES: usize = 500;
+    const CALIBRATION_SAMPLE_WEIGHT: f32 = 1.0 / CALIBRATION_SAMPLES as f32;
 
-    defmt::debug!("calibration started");
+    defmt::info!("calibration started");
 
-    let mut calibrator = Calibrator::new();
+    let mut gyro_mean = Vector3::zeros();
+    let mut accel_mean = Vector3::zeros();
+
     for _ in 0..CALIBRATION_SAMPLES {
         INTERRUPT_SIGNAL.wait().await;
         let data = imu.read().await?;
-        calibrator.add_sample(data.gyro.into(), data.accel.into());
+        gyro_mean += Vector3::from(data.gyro) * CALIBRATION_SAMPLE_WEIGHT;
+        accel_mean += Vector3::from(data.accel) * CALIBRATION_SAMPLE_WEIGHT;
     }
-    let (gyro_bias, accel_bias) = calibrator.compute_bias();
 
     let board_forward_angle = persistent_config::get_board_forward_angle()
         .await
         .unwrap_or(0.0)
         .to_radians();
 
-    let up = accel_bias.normalize();
+    let up = accel_mean.normalize();
     let down = -up;
 
     let reference = if down.x.abs() < 0.9 {
@@ -133,19 +138,30 @@ async fn calibrate(imu: &mut Imu) -> Result<(Vector3<f32>, Matrix3<f32>), Error>
         Vector3::y()
     };
 
-    let board_rotation = Rotation3::new(up * board_forward_angle);
+    let board_rotation = Rotation3::new(down * board_forward_angle);
 
     let east = board_rotation * down.cross(&reference).normalize();
     let north = east.cross(&down).normalize();
     let rot = Matrix3::from_columns(&[north, east, down]);
 
-    defmt::debug!("calibration completed");
-    defmt::debug!("gyro bias: {} {} {}", gyro_bias.x, gyro_bias.y, gyro_bias.z);
+    let gyro_bias = rot * gyro_mean;
+    // In NED the accelerometer reads -1g in the z direction.
+    let accel_bias = rot * accel_mean + Vector3::z();
+
+    defmt::info!("calibration completed");
+    defmt::info!("gyro bias: {} {} {}", gyro_bias.x, gyro_bias.y, gyro_bias.z);
+    defmt::info!(
+        "accel bias: {} {} {}",
+        accel_bias.x,
+        accel_bias.y,
+        accel_bias.z
+    );
 
     persistent_config::set_gyro_bias(gyro_bias.into()).await;
+    persistent_config::set_accel_bias(accel_bias.into()).await;
     persistent_config::set_imu_orientation(*rot.as_slice().as_array::<9>().unwrap()).await;
 
-    Ok((gyro_bias, rot))
+    Ok((gyro_bias, accel_bias, rot))
 }
 
 #[embassy_executor::task]
@@ -153,33 +169,5 @@ async fn interrupt_listener_task(mut interrupt_pin: gpio::Input<'static>) {
     loop {
         interrupt_pin.wait_for_rising_edge().await;
         INTERRUPT_SIGNAL.signal(());
-    }
-}
-
-struct Calibrator {
-    accumulated_gyro: Vector3<f32>,
-    accumulated_accel: Vector3<f32>,
-    samples_collected: usize,
-}
-
-impl Calibrator {
-    fn new() -> Self {
-        Self {
-            accumulated_gyro: Vector3::zeros(),
-            accumulated_accel: Vector3::zeros(),
-            samples_collected: 0,
-        }
-    }
-
-    fn add_sample(&mut self, gyro: Vector3<f32>, accel: Vector3<f32>) {
-        self.accumulated_gyro += gyro;
-        self.accumulated_accel += accel - Vector3::new(0.0, 0.0, 1.0);
-        self.samples_collected += 1;
-    }
-
-    fn compute_bias(&self) -> (Vector3<f32>, Vector3<f32>) {
-        let gyro_bias = self.accumulated_gyro / self.samples_collected as f32;
-        let accel_bias = self.accumulated_accel / self.samples_collected as f32;
-        (gyro_bias, accel_bias)
     }
 }

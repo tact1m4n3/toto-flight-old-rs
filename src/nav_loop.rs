@@ -21,7 +21,7 @@ pub enum Command {
 }
 
 pub fn init(spawner: SystemSpawner) {
-    spawner.high_prio.spawn(nav_loop().unwrap());
+    spawner.default.spawn(nav_loop().unwrap());
 }
 
 const FREQ_HZ: u64 = 200;
@@ -39,13 +39,13 @@ async fn nav_loop() {
     };
     let mut flight_mode_manager = FlightModeManager {
         rate_mode_condition: ChannelCondition {
-            channel_idx: 5,
+            channel_idx: 6,
             range: 1300..=1700,
             state: false,
         },
     };
     let mut servo_mid_point_calibration_condition = ChannelCondition {
-        channel_idx: 6,
+        channel_idx: 7,
         range: 1500..=2000,
         state: true,
     };
@@ -54,28 +54,35 @@ async fn nav_loop() {
     loop {
         ticker.next().await;
 
-        let (channels, channels_timestamp) = receiver::CHANNELS.get_with_timestamp();
+        let (channels, channels_timestamp) =
+            critical_section::with(|cs| receiver::CHANNELS.get_with_timestamp(cs));
 
         let mut arm_request: Option<bool> = None;
 
         // TODO: failsafe logic should be abstracted and implemented as a state machine a more
         // complicated algorithm is implemented
-        if !failsafe && Instant::now() - channels_timestamp > Duration::from_millis(1000) {
-            // disarm on failsafe
-            arm_request = Some(false);
-            failsafe = true;
-        } else {
+        if Instant::now() - channels_timestamp > Duration::from_millis(1000) {
+            if !failsafe {
+                // disarm on failsafe
+                arm_request = Some(false);
+                defmt::info!("failsafe active disarm");
+                failsafe = true;
+            }
+        } else if failsafe {
             failsafe = false;
+            defmt::info!("connection recovered");
         }
 
         if let Some(arm_request) = arm_condition.update(&channels).or(arm_request) {
             match arm_request {
                 true if !is_armed && !failsafe && ArmBlocker::arm().is_ok() => {
+                    defmt::info!("armed");
                     is_armed = true;
                     black_box::begin_new_file();
                     black_box::set_recording_enabled(true);
                 }
                 false => {
+                    defmt::info!("disarmed");
                     ArmBlocker::disarm();
                     is_armed = false;
                     black_box::set_recording_enabled(false);
@@ -114,7 +121,7 @@ async fn nav_loop() {
             Command::Idle
         };
 
-        COMMAND.set(command);
+        critical_section::with(|cs| COMMAND.set(cs, command));
     }
 }
 
