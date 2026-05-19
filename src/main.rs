@@ -23,7 +23,7 @@ use embassy_rp::{
     peripherals, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
-use embassy_time::Instant;
+use embassy_time::{Duration, Instant};
 use static_cell::StaticCell;
 
 use defmt_rtt as _;
@@ -62,30 +62,33 @@ assign_resources! {
         uart: UART0,
         tx_pin: PIN_0,
         rx_pin: PIN_1,
+        tx_dma: DMA_CH2,
     },
     gps: GpsPeripherals {
         uart: UART1,
         tx_pin: PIN_4,
         rx_pin: PIN_5,
         pps_pin: PIN_14,
+        tx_dma: DMA_CH3,
     },
     sd_card: SdCardPeripherals {
         spi: SPI0,
         clk_pin: PIN_34,
         mosi_pin: PIN_35,
         miso_pin: PIN_36,
-        tx_dma: DMA_CH2,
-        rx_dma: DMA_CH3,
+        tx_dma: DMA_CH4,
+        rx_dma: DMA_CH5,
         cs_pin: PIN_39,
     },
     flash: FlashPeripherals {
         flash: FLASH,
-        dma: DMA_CH4,
+        dma: DMA_CH6,
     },
 }
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
+    let cp = cortex_m::Peripherals::take().unwrap();
     let p = embassy_rp::init(Default::default());
 
     let r = split_resources!(p);
@@ -112,13 +115,13 @@ fn main() -> ! {
     };
 
     static IDLE_EXECUTOR: StaticCell<Executor> = StaticCell::new();
-    IDLE_EXECUTOR.init(Executor::new()).run(|idle_spawner| {
-        idle_spawner.spawn(idle_task(spawner, r).unwrap());
-    });
+    IDLE_EXECUTOR
+        .init(Executor::new())
+        .run(|idle_spawner| idle_spawner.spawn(idle(spawner, cp, r).unwrap()));
 }
 
 #[embassy_executor::task]
-pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
+pub async fn idle(spawner: SystemSpawner, mut cp: cortex_m::Peripherals, r: AssignedResources) {
     persistent_config::init(r.flash).await;
 
     let i2c_device = init_i2c(r.i2c_bus);
@@ -145,13 +148,21 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
         }
     };
 
-    let mut last_blink = Instant::now();
-    let mut idle_ticks: u64 = 0;
+    cp.DCB.enable_trace();
 
-    let mut idle_led = gpio::Output::new(r.led.pin, gpio::Level::Low);
+    cp.DWT.set_cycle_count(0);
+    cp.DWT.set_exception_count(0);
+    cp.DWT.enable_cycle_counter();
+
+    // set SEVONPEND flag so that interrupts set the event flag even inside a critical section
+    unsafe { cp.SCB.scr.modify(|reg| reg | 0x10) }
+
+    let mut led = gpio::Output::new(r.led.pin, gpio::Level::Low);
+
+    let mut last_tick_ticks: u32 = 0;
+    let mut idle_ticks: u32 = 0;
+    let mut last_tick_instant: Instant = Instant::now();
     loop {
-        let before = Instant::now();
-
         if let Some(storage) = storage.as_mut() {
             match storage.poll() {
                 Ok(()) => (),
@@ -161,19 +172,29 @@ pub async fn idle_task(spawner: SystemSpawner, r: AssignedResources) {
             }
         }
 
-        cortex_m::asm::wfi();
+        // TODO: Add feature flag to disable cpu usage monitoring since it adds some overhead
+        let mut before: u32 = 0;
+        let mut after: u32 = 0;
+        critical_section::with(|_| {
+            before = cp.DWT.cyccnt.read();
+            cortex_m::asm::wfe();
+            after = cp.DWT.cyccnt.read();
+        });
+        idle_ticks += after.wrapping_sub(before);
 
-        let now = Instant::now();
-        idle_ticks += (now - before).as_micros();
+        let now_instant = Instant::now();
+        if now_instant - last_tick_instant > Duration::from_secs(1) {
+            let ticks_now = cp.DWT.cyccnt.read();
+            let tick_diff = ticks_now.wrapping_sub(last_tick_ticks);
+            let cpu_usage = 100u64.saturating_sub(idle_ticks as u64 * 100 / tick_diff as u64);
 
-        let elapsed_since_last_blink = now - last_blink;
-        if elapsed_since_last_blink.as_micros() >= 1_000_000 {
-            let total = elapsed_since_last_blink.as_micros();
-            let cpu = 100 - (idle_ticks * 100 / total);
-            defmt::info!("cpu: {}%", cpu);
+            defmt::info!("cpu usage: {}%", cpu_usage);
+
+            led.toggle();
+
+            last_tick_instant = now_instant;
+            last_tick_ticks = ticks_now;
             idle_ticks = 0;
-            last_blink = now;
-            idle_led.toggle();
         }
     }
 }
@@ -214,7 +235,6 @@ fn SWI_IRQ_1() {
 embassy_rp::bind_interrupts!(pub struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
     I2C0_IRQ => i2c::InterruptHandler<I2C0>;
-    UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
     UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>,
                  dma::InterruptHandler<DMA_CH1>,

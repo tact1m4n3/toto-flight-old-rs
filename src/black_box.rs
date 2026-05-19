@@ -22,7 +22,7 @@ const LOG_FILE_EXTENSION: &str = "BIN";
 const MAX_FILE_NAME_LEN: usize = LOG_FILE_PREFIX.len() + 3 + ".".len() + LOG_FILE_EXTENSION.len();
 const _: () = assert!(MAX_FILE_NAME_LEN <= 11);
 
-const LOG_RATE_HZ: u64 = 1000;
+const LOG_RATE_HZ: u64 = 100;
 const LOG_RATE_PERIOD: Duration = Duration::from_hz(LOG_RATE_HZ);
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
@@ -79,7 +79,7 @@ impl Storage {
             Delay,
             AcquireOpts {
                 use_crc: true,
-                acquire_retries: 5,
+                acquire_retries: 1,
             },
         );
 

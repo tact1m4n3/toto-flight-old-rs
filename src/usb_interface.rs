@@ -5,7 +5,7 @@ use embassy_usb::{class::cdc_acm, driver::EndpointError};
 use heapless::String;
 use static_cell::StaticCell;
 
-use crate::{Irqs, SystemSpawner, UsbPeripherals, nav_loop::ArmBlocker, sensors::imu};
+use crate::{Irqs, SystemSpawner, UsbPeripherals, sensors::imu};
 
 mod config_commands;
 
@@ -66,7 +66,7 @@ async fn serial_handler(mut cdc: CdcAcmClass) {
     loop {
         cdc.wait_connection().await;
         defmt::info!("usb connected");
-        let _arm_guard = ArmBlocker::new();
+        // let _arm_guard = ArmBlocker::new();
         let _ = shell(&mut cdc).await;
         defmt::info!("usb disconnected");
     }
