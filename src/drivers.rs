@@ -1,1 +1,2 @@
-pub mod lsm6dsv;
+pub mod battery;
+pub mod imu;

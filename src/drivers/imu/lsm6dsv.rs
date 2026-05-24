@@ -7,30 +7,22 @@
 
 // TODO: add support for multiple data rates
 
-use embassy_time::{Duration, Timer};
-use embedded_hal_async::spi::SpiDevice;
+use embedded_hal_async::{delay::DelayNs, spi::SpiDevice};
+use nalgebra::Vector3;
 
 pub type Lsm6dsv<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
 pub type Lsm6dsv16x<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
 pub type Lsm6dsv16b<SPI> = Lsm6dsvGeneric<SPI, 0x71, true>;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ImuData {
-    /// Angular rate in rad/s
-    pub gyro: [f32; 3],
-    /// Linear acceleration in m/s^2
-    pub accel: [f32; 3],
-}
-
 #[derive(Debug)]
-pub enum Error<SpiE> {
+pub enum InitError<SpiE> {
     Spi(SpiE),
     WhoAmI(u8),
 }
 
-impl<SpiE> From<SpiE> for Error<SpiE> {
+impl<SpiE> From<SpiE> for InitError<SpiE> {
     fn from(e: SpiE) -> Self {
-        Error::Spi(e)
+        InitError::Spi(e)
     }
 }
 
@@ -43,24 +35,24 @@ impl<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool>
 where
     SPI: SpiDevice,
 {
-    pub async fn new(spi: SPI) -> Result<Self, Error<SPI::Error>> {
+    pub async fn new<D: DelayNs>(spi: SPI, delay: D) -> Result<Self, InitError<SPI::Error>> {
         let mut this = Self { spi };
-        this.init().await?;
+        this.init(delay).await?;
         Ok(this)
     }
 
-    async fn init(&mut self) -> Result<(), Error<SPI::Error>> {
+    async fn init<D: DelayNs>(&mut self, mut delay: D) -> Result<(), InitError<SPI::Error>> {
         // Verify device identity
         let whoami = self.read_reg(WHO_AM_I).await?;
         if whoami != WHO_AM_I_REG {
-            return Err(Error::WhoAmI(whoami));
+            return Err(InitError::WhoAmI(whoami));
         }
 
         // Software reset (sets all registers to default)
         self.write_reg(CTRL3, CTRL3_SW_RESET).await?;
         // Poll until reset completes (bit self-clears)
         loop {
-            Timer::after(Duration::from_millis(1)).await;
+            delay.delay_ms(1).await;
             let v = self.read_reg(CTRL3).await?;
             if v & CTRL3_SW_RESET == 0 {
                 break;
@@ -108,7 +100,27 @@ where
         Ok(())
     }
 
-    pub async fn read(&mut self) -> Result<ImuData, Error<SPI::Error>> {
+    async fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), SPI::Error> {
+        // MSB = 0 → write
+        self.spi.write(&[reg & !SPI_READ, val]).await?;
+        Ok(())
+    }
+
+    async fn read_reg(&mut self, reg: u8) -> Result<u8, SPI::Error> {
+        let mut buf = [reg | SPI_READ, 0x00];
+        self.spi.transfer_in_place(&mut buf).await?;
+        Ok(buf[1])
+    }
+}
+
+impl<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool> super::ImuSensor
+    for Lsm6dsvGeneric<SPI, WHO_AM_I_REG, ACCEL_AXES_ORDER_REVERSED>
+where
+    SPI: SpiDevice,
+{
+    type Error = SPI::Error;
+
+    async fn read(&mut self) -> Result<super::Data, Self::Error> {
         // 1 address byte + 12 data bytes
         let mut buf = [0u8; 13];
         buf[0] = OUTX_L_G | SPI_READ;
@@ -142,30 +154,18 @@ where
             ),
         };
 
-        Ok(ImuData {
-            gyro: [
+        Ok(super::Data {
+            gyro: Vector3::new(
                 gx as f32 * GYRO_SCALE_DPS,
                 gy as f32 * GYRO_SCALE_DPS,
                 gz as f32 * GYRO_SCALE_DPS,
-            ],
-            accel: [
+            ),
+            accel: Vector3::new(
                 ax as f32 * ACCEL_SCALE_G,
                 ay as f32 * ACCEL_SCALE_G,
                 az as f32 * ACCEL_SCALE_G,
-            ],
+            ),
         })
-    }
-
-    async fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), Error<SPI::Error>> {
-        // MSB = 0 → write
-        self.spi.write(&[reg & !SPI_READ, val]).await?;
-        Ok(())
-    }
-
-    async fn read_reg(&mut self, reg: u8) -> Result<u8, Error<SPI::Error>> {
-        let mut buf = [reg | SPI_READ, 0x00];
-        self.spi.transfer_in_place(&mut buf).await?;
-        Ok(buf[1])
     }
 }
 
