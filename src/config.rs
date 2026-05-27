@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use embassy_sync::signal::Signal;
+use embassy_sync::{channel::Channel, once_lock::OnceLock};
 use embedded_storage_async::nor_flash::NorFlash;
 use nalgebra::{Matrix3, Vector3};
 use sequential_storage::{
@@ -12,147 +12,190 @@ pub use sequential_storage::Error;
 
 use crate::{
     RawMutex,
-    utils::{NalgebraMatrix3Ext, NalgebraVec3Ext, SyncWatch},
+    utils::{NalgebraMatrix3Ext, NalgebraVec3Ext},
 };
 
 const BUFFER_SIZE: usize = 64;
 
-pub static BOARD_FORWARD_ANGLE: SyncWatch<RawMutex, f32> = SyncWatch::new(0.0);
-pub static IMU_CALIBRATION: SyncWatch<RawMutex, ImuCalibration> =
-    SyncWatch::new(ImuCalibration::DEFAULT);
-pub static BOARD_ORIENTATION: SyncWatch<RawMutex, Matrix3<f32>> = SyncWatch::new(Matrix3::IDENTITY);
-pub static RATE_CONTROLLER_CONFIG: SyncWatch<RawMutex, RateControllerConfig> =
-    SyncWatch::new(RateControllerConfig::DEFAULT);
-// TODO: Find a way to initialize a const array with the same value. See core::array::from_fn.
-// Maybe use a macro.
-pub static SERVOS_CONFIG: [SyncWatch<RawMutex, ServoConfig>; 2] = [
-    SyncWatch::new(ServoConfig::DEFAULT),
-    SyncWatch::new(ServoConfig::DEFAULT),
-];
-static COMMIT: Signal<RawMutex, ()> = Signal::new();
+pub static INITIAL_CONFIG: OnceLock<FullConfig> = OnceLock::new();
+pub static UPDATE_CONFIG: Channel<RawMutex, ConfigItem, 4> = Channel::new();
 
-pub fn commit() {
-    COMMIT.signal(());
+#[derive(Clone, Copy)]
+pub enum ConfigItem {
+    BoardForwardAngle(f32),
+    ImuCalibration(ImuCalibration),
+    BoardOrientation(Matrix3<f32>),
+    RateControllerConfig(RateControllerConfig),
+    ServoConfig { index: u8, config: ServoConfig },
 }
 
-pub struct Storage<F: NorFlash> {
+pub struct FullConfig {
+    pub board_forward_angle: f32,
+    pub imu_calibration: ImuCalibration,
+    pub board_orientation: Matrix3<f32>,
+    pub rate_controller_config: RateControllerConfig,
+    pub servos_config: [ServoConfig; 5],
+}
+
+impl Default for FullConfig {
+    fn default() -> Self {
+        Self {
+            board_forward_angle: 0.0,
+            imu_calibration: ImuCalibration {
+                gyro_bias: Vector3::ZEROS,
+                accel_bias: Vector3::ZEROS,
+                accel_scale: Vector3::ONES,
+            },
+            board_orientation: Matrix3::IDENTITY,
+            rate_controller_config: RateControllerConfig {
+                roll: RateControllerAxisConfig {
+                    kp: 7.0,
+                    ki: 10.0,
+                    kff: 50.0,
+                },
+                pitch: RateControllerAxisConfig {
+                    kp: 7.0,
+                    ki: 10.0,
+                    kff: 90.0,
+                },
+                yaw: RateControllerAxisConfig {
+                    kp: 0.0,
+                    ki: 00.0,
+                    kff: 40.0,
+                },
+            },
+            servos_config: [ServoConfig {
+                mid_point_us: 1500,
+                min_us: 1000,
+                max_us: 2000,
+                mixer_gain: Vector3::ZEROS,
+            }; 5],
+        }
+    }
+}
+
+pub async fn task<F: NorFlash>(flash: F, range: Range<u32>) {
+    let mut storage = Storage::new(flash, range);
+    let config = match storage.read_full_config().await {
+        Ok(config) => config,
+        Err(Error::Corrupted {}) => {
+            defmt::warn!("config in flash is corrupted. erasing all config");
+            storage.inner.erase_all().await.ok();
+            FullConfig::default()
+        }
+        Err(err) => panic!(
+            "unexpected error while reading config from flash: {:?}",
+            err
+        ),
+    };
+    INITIAL_CONFIG.init(config).ok();
+
+    loop {
+        // TODO: only receive while we are not armed
+        let config_item = UPDATE_CONFIG.receive().await;
+        if storage.update_config(config_item).await.is_err() {
+            defmt::error!("failed to update config in flash");
+        }
+    }
+}
+
+struct Storage<F: NorFlash> {
     inner: MapStorage<StorageKey, F, NoCache>,
 }
 
 impl<F: NorFlash> Storage<F> {
-    pub async fn new(flash: F, range: Range<u32>) -> Result<Storage<F>, Error<F::Error>> {
-        let mut this = Self {
+    fn new(flash: F, range: Range<u32>) -> Storage<F> {
+        Self {
             inner: MapStorage::new(flash, MapConfig::new(range), NoCache),
-        };
-
-        if this.init().await.is_err() {
-            this.inner.erase_all().await?;
-            this.init().await?;
         }
-
-        Ok(this)
     }
 
-    pub async fn run(&mut self) {
-        let mut board_forward_angle_watcher = BOARD_FORWARD_ANGLE.watcher();
-        let mut imu_calibration_watcher = IMU_CALIBRATION.watcher();
-        let mut board_orientation_watcher = BOARD_ORIENTATION.watcher();
-        let mut rate_controller_config_watcher = RATE_CONTROLLER_CONFIG.watcher();
-        let mut servo_config_watchers: [_; SERVOS_CONFIG.len()] =
-            core::array::from_fn(|i| SERVOS_CONFIG[i].watcher());
-
-        loop {
-            // TODO: Do this only when arming is disabled
-            COMMIT.wait().await;
-
-            if let Some(board_forward_angle) = board_forward_angle_watcher.get_if_changed() {
-                self.write(
+    async fn update_config(&mut self, config_item: ConfigItem) -> Result<(), Error<F::Error>> {
+        match config_item {
+            ConfigItem::BoardForwardAngle(angle) => {
+                self.raw_write(
                     &StorageKey::BoardForwardAngle,
-                    &StorageValue::BoardForwardAngle(board_forward_angle),
+                    &StorageValue::BoardForwardAngle(angle),
                 )
-                .await
-                .ok();
+                .await?;
             }
-
-            if let Some(imu_calibration) = imu_calibration_watcher.get_if_changed() {
-                self.write(
+            ConfigItem::ImuCalibration(calib) => {
+                self.raw_write(
                     &StorageKey::ImuCalibration,
-                    &StorageValue::ImuCalibration(imu_calibration),
+                    &StorageValue::ImuCalibration(calib),
                 )
-                .await
-                .ok();
+                .await?;
             }
-
-            if let Some(board_orientation) = board_orientation_watcher.get_if_changed() {
-                self.write(
+            ConfigItem::BoardOrientation(orientation) => {
+                self.raw_write(
                     &StorageKey::BoardOrientation,
-                    &StorageValue::BoardOrientation(board_orientation),
+                    &StorageValue::BoardOrientation(orientation),
                 )
-                .await
-                .ok();
+                .await?;
             }
-
-            if let Some(rate_controller_config) = rate_controller_config_watcher.get_if_changed() {
-                self.write(
+            ConfigItem::RateControllerConfig(rcc) => {
+                self.raw_write(
                     &StorageKey::RateControllerConfig,
-                    &StorageValue::RateControllerConfig(rate_controller_config),
+                    &StorageValue::RateControllerConfig(rcc),
                 )
-                .await
-                .ok();
+                .await?;
             }
-
-            for (i, watcher) in servo_config_watchers.iter_mut().enumerate() {
-                if let Some(servo_config) = watcher.get_if_changed() {
-                    self.write(
-                        &StorageKey::ServoConfig { index: i as u8 },
-                        &StorageValue::ServoConfig(servo_config),
-                    )
-                    .await
-                    .ok();
-                }
+            ConfigItem::ServoConfig { index, config } => {
+                self.raw_write(
+                    &StorageKey::ServoConfig { index },
+                    &StorageValue::ServoConfig(config),
+                )
+                .await?;
             }
-        }
-    }
-
-    async fn init(&mut self) -> Result<(), Error<F::Error>> {
-        match self.read(&StorageKey::BoardForwardAngle).await? {
-            Some(StorageValue::BoardForwardAngle(bfa)) => BOARD_FORWARD_ANGLE.set(bfa),
-            Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
-            None => (),
-        };
-
-        match self.read(&StorageKey::ImuCalibration).await? {
-            Some(StorageValue::ImuCalibration(imu_calib)) => IMU_CALIBRATION.set(imu_calib),
-            Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
-            None => (),
-        };
-
-        match self.read(&StorageKey::RateControllerConfig).await? {
-            Some(StorageValue::RateControllerConfig(rcc)) => RATE_CONTROLLER_CONFIG.set(rcc),
-            Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
-            None => (),
-        };
-
-        for (i, watch) in SERVOS_CONFIG.iter().enumerate() {
-            match self
-                .read(&StorageKey::ServoConfig { index: i as u8 })
-                .await?
-            {
-                Some(StorageValue::ServoConfig(sc)) => watch.set(sc),
-                Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
-                None => (),
-            };
         }
 
         Ok(())
     }
 
-    async fn read(&mut self, key: &StorageKey) -> Result<Option<StorageValue>, Error<F::Error>> {
+    async fn read_full_config(&mut self) -> Result<FullConfig, Error<F::Error>> {
+        let mut config = FullConfig::default();
+
+        match self.raw_read(&StorageKey::BoardForwardAngle).await? {
+            Some(StorageValue::BoardForwardAngle(bfa)) => config.board_forward_angle = bfa,
+            Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
+            None => (),
+        };
+
+        match self.raw_read(&StorageKey::ImuCalibration).await? {
+            Some(StorageValue::ImuCalibration(imu_calib)) => config.imu_calibration = imu_calib,
+            Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
+            None => (),
+        };
+
+        match self.raw_read(&StorageKey::RateControllerConfig).await? {
+            Some(StorageValue::RateControllerConfig(rcc)) => config.rate_controller_config = rcc,
+            Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
+            None => (),
+        };
+
+        for (i, servo_config) in config.servos_config.iter_mut().enumerate() {
+            match self
+                .raw_read(&StorageKey::ServoConfig { index: i as u8 })
+                .await?
+            {
+                Some(StorageValue::ServoConfig(sc)) => *servo_config = sc,
+                Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
+                None => (),
+            };
+        }
+
+        Ok(config)
+    }
+
+    async fn raw_read(
+        &mut self,
+        key: &StorageKey,
+    ) -> Result<Option<StorageValue>, Error<F::Error>> {
         let mut buffer = [0u8; BUFFER_SIZE];
         self.inner.fetch_item(&mut buffer, key).await
     }
 
-    async fn write(
+    async fn raw_write(
         &mut self,
         key: &StorageKey,
         value: &StorageValue,
@@ -225,39 +268,11 @@ pub struct ImuCalibration {
     pub accel_scale: Vector3<f32>,
 }
 
-impl ImuCalibration {
-    const DEFAULT: ImuCalibration = ImuCalibration {
-        gyro_bias: Vector3::ZEROS,
-        accel_bias: Vector3::ZEROS,
-        accel_scale: Vector3::ONES,
-    };
-}
-
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct RateControllerConfig {
     roll: RateControllerAxisConfig,
     pitch: RateControllerAxisConfig,
     yaw: RateControllerAxisConfig,
-}
-
-impl RateControllerConfig {
-    const DEFAULT: RateControllerConfig = RateControllerConfig {
-        roll: RateControllerAxisConfig {
-            kp: 7.0,
-            ki: 10.0,
-            kff: 50.0,
-        },
-        pitch: RateControllerAxisConfig {
-            kp: 7.0,
-            ki: 10.0,
-            kff: 90.0,
-        },
-        yaw: RateControllerAxisConfig {
-            kp: 0.0,
-            ki: 00.0,
-            kff: 40.0,
-        },
-    };
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -273,13 +288,4 @@ pub struct ServoConfig {
     min_us: u16,
     max_us: u16,
     mixer_gain: Vector3<f32>,
-}
-
-impl ServoConfig {
-    const DEFAULT: ServoConfig = ServoConfig {
-        mid_point_us: 1500,
-        min_us: 1000,
-        max_us: 2000,
-        mixer_gain: Vector3::ZEROS,
-    };
 }

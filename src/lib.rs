@@ -4,7 +4,6 @@
 pub(crate) type RawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 pub mod battery;
-pub mod calibration;
 pub mod config;
 pub mod drivers;
 pub mod imu;

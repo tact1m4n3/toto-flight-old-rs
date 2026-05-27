@@ -7,20 +7,21 @@ use crate::{RawMutex, utils::SyncWatch};
 pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new([1_500; 16]);
 pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats::DEFAULT);
 
+async fn read_process_and_consume<R: BufRead, F: FnMut(&[u8])>(reader: &mut R, mut f: F) -> Result<(), R::Error> {
+    let n = {
+        let data = reader.fill_buf().await?;
+        f(data);
+        data.len()
+    };
+    reader.consume(n);
+    Ok(())
+}
+
 pub async fn task_read<R: BufRead>(mut reader: R) {
     let mut parser: crsf::Parser = crsf::Parser::new(crsf::ParserConfig::default());
 
     loop {
-        let n = {
-            let data = match reader.fill_buf().await {
-                Ok(data) => data,
-                Err(_) => {
-                    parser.reset();
-                    defmt::error!("failed to read from uart");
-                    continue;
-                }
-            };
-
+        let result = read_process_and_consume(&mut reader, |data| {
             for result in parser.iter_packets(data) {
                 let packet = match result {
                     Ok(packet) => packet,
@@ -52,11 +53,14 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                     _ => {}
                 }
             }
+        })
+        .await;
 
-            data.len()
-        };
-
-        reader.consume(n);
+        if result.is_err() {
+            parser.reset();
+            defmt::error!("failed to read from uart");
+            continue;
+        }
     }
 }
 

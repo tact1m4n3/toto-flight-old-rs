@@ -1,4 +1,8 @@
-use core::{cell::RefCell, ops::Range};
+use core::{
+    cell::RefCell,
+    ops::Range,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
@@ -141,60 +145,53 @@ macro_rules! assign_resources {
 }
 
 pub struct SyncWatch<M: RawMutex, T: Copy> {
-    state: Mutex<M, RefCell<SyncWatchState<T>>>,
-}
-
-struct SyncWatchState<T: Copy> {
-    value: T,
-    current_version: u64,
+    state: Mutex<M, RefCell<T>>,
+    current_version: AtomicU32,
 }
 
 impl<M: RawMutex, T: Copy> SyncWatch<M, T> {
     pub const fn new(initial_value: T) -> Self {
         Self {
-            state: Mutex::new(RefCell::new(SyncWatchState {
-                value: initial_value,
-                current_version: 0,
-            })),
+            state: Mutex::new(RefCell::new(initial_value)),
+            current_version: AtomicU32::new(0),
         }
     }
 
     pub fn watcher<'a>(&'a self) -> SyncWatchReader<'a, M, T> {
         SyncWatchReader {
-            state: &self.state,
+            watch: self,
             last_read_version: None,
         }
     }
 
     pub fn get(&self) -> T {
-        self.state.lock(|state| state.borrow().value)
+        self.state.lock(|state| *state.borrow())
     }
 
     pub fn set(&self, new_value: T) {
         self.state.lock(|state| {
-            let mut state = state.borrow_mut();
-            state.value = new_value;
-            state.current_version += 1;
+            *state.borrow_mut() = new_value;
         });
+        self.current_version.fetch_add(1, Ordering::Release);
     }
 }
 
 pub struct SyncWatchReader<'a, M: RawMutex, T: Copy> {
-    state: &'a Mutex<M, RefCell<SyncWatchState<T>>>,
-    last_read_version: Option<u64>,
+    watch: &'a SyncWatch<M, T>,
+    last_read_version: Option<u32>,
 }
 
 impl<'a, M: RawMutex, T: Copy> SyncWatchReader<'a, M, T> {
     pub fn get_if_changed(&mut self) -> Option<T> {
-        self.state.lock(|state| {
-            let state = state.borrow();
-            if let Some(last_read_version) = self.last_read_version
-                && state.current_version <= last_read_version
-            {
-                return None;
-            }
-            self.last_read_version = Some(state.current_version);
-            Some(state.value)
-        })
+        let current_version = self.watch.current_version.load(Ordering::Acquire);
+        if let Some(last_read_version) = self.last_read_version
+            && current_version == last_read_version
+        {
+            return None;
+        }
+
+        let value = self.watch.get();
+        self.last_read_version = Some(current_version);
+        Some(value)
     }
 }

@@ -40,7 +40,6 @@ type ImuSensor = Lsm6dsv16b<ImuSpiDevice>;
 
 type Flash = flash::Flash<'static, FLASH, flash::Blocking, FLASH_SIZE>;
 type AsyncFlash = BlockingAsync<flash::Flash<'static, FLASH, flash::Blocking, FLASH_SIZE>>;
-type Storage = toto_flight::config::Storage<AsyncFlash>;
 
 type BatterySensor = Ina226<SharedI2cDevice>;
 
@@ -223,9 +222,6 @@ async fn main(thread_spawner: Spawner) -> ! {
     let battery_sensor = BatterySensor::new(i2c_device.clone()).await.unwrap();
 
     let flash = BlockingAsync::new(Flash::new_blocking(r.flash.flash));
-    let storage = toto_flight::config::Storage::new(flash, FLASH_STORAGE_RANGE)
-        .await
-        .unwrap();
 
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
     let uart_read_spawner = UART_READ_EXECUTOR.start(interrupt::SWI_IRQ_1);
@@ -239,7 +235,7 @@ async fn main(thread_spawner: Spawner) -> ! {
 
     low_prio_spawner.spawn(battery_task(battery_sensor).unwrap());
     low_prio_spawner.spawn(receiver_telemetry_task(receiver_uart_tx).unwrap());
-    low_prio_spawner.spawn(config_task(storage).unwrap());
+    low_prio_spawner.spawn(config_task(flash).unwrap());
 
     cp.DCB.enable_trace();
 
@@ -310,8 +306,8 @@ async fn battery_task(battery_sensor: BatterySensor) {
 }
 
 #[embassy_executor::task]
-async fn config_task(mut storage: Storage) {
-    storage.run().await;
+async fn config_task(mut flash: AsyncFlash) {
+    toto_flight::config::task(flash, FLASH_STORAGE_RANGE).await;
 }
 
 #[defmt::panic_handler]
