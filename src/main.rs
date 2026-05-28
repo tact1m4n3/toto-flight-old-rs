@@ -11,11 +11,12 @@ use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_rp::{
     Peri, dma, flash, gpio, i2c,
     interrupt::{self, InterruptExt},
-    peripherals, spi, uart, usb,
+    peripherals, pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
 use embassy_time::{Duration, Instant};
-use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
+use embedded_hal_bus::spi::ExclusiveDevice;
+use fixed::FixedU16;
 use static_cell::StaticCell;
 
 use defmt_rtt as _;
@@ -24,7 +25,10 @@ use panic_probe as _;
 #[macro_use]
 extern crate toto_flight;
 
-use toto_flight::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b};
+use toto_flight::{
+    config::Config,
+    drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b},
+};
 
 const FLASH_SIZE: usize = 16 * 1024 * 1024;
 const FLASH_STORAGE_RANGE: Range<u32> = 15 * 1024 * 1024..16 * 1024 * 1024; // store in the last megabyte
@@ -33,15 +37,23 @@ type I2cBus = i2c::I2c<'static, I2C0, i2c::Async>;
 type SharedI2cBus = AsyncMutex<CriticalSectionRawMutex, I2cBus>;
 type SharedI2cDevice = I2cDevice<'static, CriticalSectionRawMutex, I2cBus>;
 
-type ImuSpiDevice =
-    ExclusiveDevice<spi::Spi<'static, SPI1, spi::Async>, gpio::Output<'static>, NoDelay>;
+type ImuSpiDevice = ExclusiveDevice<
+    spi::Spi<'static, SPI1, spi::Async>,
+    gpio::Output<'static>,
+    embassy_time::Delay,
+>;
 type ImuInterruptPin = gpio::Input<'static>;
 type ImuSensor = Lsm6dsv16b<ImuSpiDevice>;
 
 type Flash = flash::Flash<'static, FLASH, flash::Blocking, FLASH_SIZE>;
 type AsyncFlash = BlockingAsync<flash::Flash<'static, FLASH, flash::Blocking, FLASH_SIZE>>;
+type Storage = toto_flight::config::Storage<AsyncFlash>;
 
 type BatterySensor = Ina226<SharedI2cDevice>;
+
+type Control = toto_flight::control::Control<1, 2>;
+type Outputs =
+    toto_flight::control::Outputs<1, 2, pwm::PwmOutput<'static>, pwm::PwmOutput<'static>>;
 
 assign_resources! {
     led: LedPeripherals {
@@ -105,17 +117,16 @@ embassy_rp::bind_interrupts!(pub struct Irqs {
     UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
     UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>,
-                 dma::InterruptHandler<DMA_CH1>,
-                 dma::InterruptHandler<DMA_CH2>,
-                 dma::InterruptHandler<DMA_CH3>,
-                 dma::InterruptHandler<DMA_CH4>,
-                 dma::InterruptHandler<DMA_CH5>,
-                 dma::InterruptHandler<DMA_CH6>;
+                 dma::InterruptHandler<DMA_CH1>;
+                 // dma::InterruptHandler<DMA_CH2>,
+                 // dma::InterruptHandler<DMA_CH3>,
+                 // dma::InterruptHandler<DMA_CH4>,
+                 // dma::InterruptHandler<DMA_CH5>,
+                 // dma::InterruptHandler<DMA_CH6>;
 });
 
 static REALTIME_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-static UART_READ_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-static NAV_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
+static HIGH_PRIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 static LOW_PRIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
 #[cortex_m_rt::interrupt]
@@ -125,16 +136,11 @@ fn SWI_IRQ_0() {
 
 #[cortex_m_rt::interrupt]
 fn SWI_IRQ_1() {
-    unsafe { UART_READ_EXECUTOR.on_interrupt() };
+    unsafe { HIGH_PRIO_EXECUTOR.on_interrupt() };
 }
 
 #[cortex_m_rt::interrupt]
 fn SWI_IRQ_2() {
-    unsafe { NAV_EXECUTOR.on_interrupt() };
-}
-
-#[cortex_m_rt::interrupt]
-fn SWI_IRQ_3() {
     unsafe { LOW_PRIO_EXECUTOR.on_interrupt() };
 }
 
@@ -148,16 +154,14 @@ async fn main(thread_spawner: Spawner) -> ! {
     let r = split_resources!(p);
 
     // init interrupts
-    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P15); // realtime executor
-    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P2); // uart read executor
-    interrupt::SWI_IRQ_2.set_priority(interrupt::Priority::P1); // nav executor
-    interrupt::SWI_IRQ_3.set_priority(interrupt::Priority::P0); // low prio executor
+    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P1); // realtime executor
+    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P3); // high prio executor
+    interrupt::SWI_IRQ_2.set_priority(interrupt::Priority::P4); // low prio executor
 
-    // embassy interrupts
-    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P3);
-    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P3);
-    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P3);
-    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P3);
+    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P2);
 
     let i2c_device = {
         static I2C_BUS: StaticCell<SharedI2cBus> = StaticCell::new();
@@ -191,13 +195,13 @@ async fn main(thread_spawner: Spawner) -> ! {
             config,
         );
         let spi_cs = gpio::Output::new(r.imu.cs_pin, gpio::Level::High);
-        ExclusiveDevice::new(spi, spi_cs, NoDelay).unwrap() // NOTE: can't fail
+        ExclusiveDevice::new(spi, spi_cs, embassy_time::Delay).unwrap() // NOTE: can't fail
     };
 
     let imu_interrupt_pin = gpio::Input::new(r.imu.int_pin, gpio::Pull::None);
 
     let (receiver_uart_tx, receiver_uart_rx) = {
-        static TX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
+        static TX_BUF: StaticCell<[u8; 64]> = StaticCell::new();
         static RX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
 
         let mut config = uart::Config::default();
@@ -208,12 +212,62 @@ async fn main(thread_spawner: Spawner) -> ! {
             r.receiver.tx_pin,
             r.receiver.rx_pin,
             Irqs,
-            TX_BUF.init([0; 256]),
+            TX_BUF.init([0; 64]),
             RX_BUF.init([0; 256]),
             config,
         );
 
         uart.split()
+    };
+
+    let gps_uart_rx = {
+        static RX_BUF: StaticCell<[u8; 128]> = StaticCell::new();
+
+        let mut config = uart::Config::default();
+        config.baudrate = 115_200;
+
+        uart::BufferedUartRx::new(
+            r.gps.uart,
+            Irqs,
+            r.gps.rx_pin,
+            RX_BUF.init([0; 128]),
+            config,
+        )
+    };
+
+    let outputs = {
+        // Make pwm counter increment once every microsecond
+        let pwm_divider = embassy_rp::clocks::clk_sys_freq() / 1_000_000;
+        // The frequency of the pwm signal is 50Hz.
+        let pwm_top = 20_000;
+
+        let mut config = pwm::Config::default();
+        config.top = pwm_top;
+        config.divider = FixedU16::from_num(pwm_divider);
+
+        let (Some(throttle_pwm), Some(left_elevon_pwm)) = pwm::Pwm::new_output_ab(
+            r.pwm_outputs.slice_esc_and_left_elevon,
+            r.pwm_outputs.esc,
+            r.pwm_outputs.left_elevon,
+            config.clone(),
+        )
+        .split() else {
+            unreachable!()
+        };
+
+        let (None, Some(right_elevon_pwm)) = pwm::Pwm::new_output_b(
+            r.pwm_outputs.slice_right_elevon,
+            r.pwm_outputs.right_elevon,
+            config.clone(),
+        )
+        .split() else {
+            unreachable!()
+        };
+
+        toto_flight::control::Outputs {
+            motors: [throttle_pwm],
+            servos: [left_elevon_pwm, right_elevon_pwm],
+        }
     };
 
     let imu_sensor = ImuSensor::new(imu_spi_device, embassy_time::Delay)
@@ -223,19 +277,28 @@ async fn main(thread_spawner: Spawner) -> ! {
 
     let flash = BlockingAsync::new(Flash::new_blocking(r.flash.flash));
 
+    let mut storage = toto_flight::config::Storage::new(flash, FLASH_STORAGE_RANGE);
+
+    static CONFIG: StaticCell<Config> = StaticCell::new();
+    let cfg = CONFIG.init(storage.read().await.unwrap());
+
+    let control = Control::new(cfg);
+
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
-    let uart_read_spawner = UART_READ_EXECUTOR.start(interrupt::SWI_IRQ_1);
-    let nav_spawner = NAV_EXECUTOR.start(interrupt::SWI_IRQ_2);
-    let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_3);
+    let high_prio_spawner = HIGH_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
+    let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_2);
 
     realtime_spawner.spawn(imu_interrupt_listener_task(imu_interrupt_pin).unwrap());
-    realtime_spawner.spawn(imu_read_task(imu_sensor).unwrap());
+    realtime_spawner.spawn(imu_read_task(cfg, imu_sensor).unwrap());
+    realtime_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
+    realtime_spawner.spawn(control_task(control, outputs).unwrap());
 
-    uart_read_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
+    high_prio_spawner.spawn(gps_task(gps_uart_rx).unwrap());
 
     low_prio_spawner.spawn(battery_task(battery_sensor).unwrap());
+    low_prio_spawner.spawn(config_task(storage).unwrap());
+    low_prio_spawner.spawn(imu_calibrate_task(cfg).unwrap());
     low_prio_spawner.spawn(receiver_telemetry_task(receiver_uart_tx).unwrap());
-    low_prio_spawner.spawn(config_task(flash).unwrap());
 
     cp.DCB.enable_trace();
 
@@ -250,7 +313,7 @@ async fn main(thread_spawner: Spawner) -> ! {
 
     let mut last_tick_ticks: u32 = 0;
     let mut idle_ticks: u32 = 0;
-    let mut last_tick_instant: Instant = Instant::now();
+    let mut last_tick_instant = Instant::now();
     loop {
         // TODO: Add feature flag to disable cpu usage monitoring since it adds some overhead
         let mut before: u32 = 0;
@@ -286,8 +349,13 @@ async fn imu_interrupt_listener_task(pin: ImuInterruptPin) {
 }
 
 #[embassy_executor::task]
-async fn imu_read_task(imu: ImuSensor) {
-    toto_flight::imu::task_read(imu).await;
+async fn imu_read_task(cfg: &'static Config, imu: ImuSensor) {
+    toto_flight::imu::task_read(cfg, imu).await;
+}
+
+#[embassy_executor::task]
+async fn imu_calibrate_task(cfg: &'static Config) {
+    toto_flight::imu::task_calibrate(cfg).await;
 }
 
 #[embassy_executor::task]
@@ -296,8 +364,18 @@ async fn receiver_read_task(uart_rx: uart::BufferedUartRx) {
 }
 
 #[embassy_executor::task]
+async fn control_task(control: Control, outputs: Outputs) {
+    control.run(outputs).await;
+}
+
+#[embassy_executor::task]
 async fn receiver_telemetry_task(uart_tx: uart::BufferedUartTx) {
     toto_flight::receiver::task_telemetry(uart_tx).await;
+}
+
+#[embassy_executor::task]
+async fn gps_task(uart_rx: uart::BufferedUartRx) {
+    toto_flight::gps::task(uart_rx).await;
 }
 
 #[embassy_executor::task]
@@ -306,8 +384,8 @@ async fn battery_task(battery_sensor: BatterySensor) {
 }
 
 #[embassy_executor::task]
-async fn config_task(mut flash: AsyncFlash) {
-    toto_flight::config::task(flash, FLASH_STORAGE_RANGE).await;
+async fn config_task(mut storage: Storage) {
+    storage.run().await;
 }
 
 #[defmt::panic_handler]

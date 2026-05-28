@@ -5,6 +5,7 @@ use core::{
 };
 
 use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
+use embedded_io_async::BufRead;
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 
 pub const US_TO_ZERO_ONE: Mapping = Mapping {
@@ -194,4 +195,17 @@ impl<'a, M: RawMutex, T: Copy> SyncWatchReader<'a, M, T> {
         self.last_read_version = Some(current_version);
         Some(value)
     }
+}
+
+pub async fn read_process_and_consume<R: BufRead, F: FnMut(&[u8])>(
+    reader: &mut R,
+    mut f: F,
+) -> Result<(), R::Error> {
+    let n = {
+        let data = reader.fill_buf().await?;
+        f(data);
+        data.len()
+    };
+    reader.consume(n);
+    Ok(())
 }

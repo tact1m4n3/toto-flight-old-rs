@@ -1,23 +1,37 @@
+use core::ops::RangeInclusive;
+
 use crsf::PayloadDump;
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
+use nalgebra::Vector3;
 
-use crate::{RawMutex, utils::SyncWatch};
+use crate::{
+    RawMutex, control,
+    utils::{SyncWatch, US_TO_NEG_ONE_ONE, read_process_and_consume},
+};
 
 pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new([1_500; 16]);
 pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats::DEFAULT);
 
-async fn read_process_and_consume<R: BufRead, F: FnMut(&[u8])>(reader: &mut R, mut f: F) -> Result<(), R::Error> {
-    let n = {
-        let data = reader.fill_buf().await?;
-        f(data);
-        data.len()
-    };
-    reader.consume(n);
-    Ok(())
-}
-
 pub async fn task_read<R: BufRead>(mut reader: R) {
+    let mut arm_switch = ChannelCondition {
+        channel_idx: 4,
+        range: 1500..=2000,
+        state: false,
+    };
+    let mut flight_mode_manager = FlightModeManager {
+        rate_mode_condition: ChannelCondition {
+            channel_idx: 5,
+            range: 1400..=1600,
+            state: false,
+        },
+        angle_mode_condition: ChannelCondition {
+            channel_idx: 5,
+            range: 1800..=2000,
+            state: false,
+        },
+    };
+
     let mut parser: crsf::Parser = crsf::Parser::new(crsf::ParserConfig::default());
 
     loop {
@@ -33,9 +47,44 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
 
                 match packet {
                     crsf::Packet::RcChannelsPacked(raw_channels) => {
-                        let us_channels: [u16; 16] =
+                        let channels: [u16; 16] =
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
-                        CHANNELS.set(us_channels);
+
+                        arm_switch.update(&channels);
+                        let flight_mode = flight_mode_manager.update(&channels);
+
+                        if arm_switch.state {
+                            match flight_mode {
+                                FlightMode::Manual => control::Command::Manual {
+                                    throttle: channels[2],
+                                    throw: Vector3::new(
+                                        channels[0] as f32 - 1500.0,
+                                        channels[1] as f32 - 1500.0,
+                                        channels[3] as f32 - 1500.0,
+                                    ),
+                                },
+                                FlightMode::Rate => control::Command::Rate {
+                                    throttle: channels[2],
+                                    rate: Vector3::new(
+                                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
+                                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
+                                        US_TO_NEG_ONE_ONE.map(channels[2] as f32) * 45.0,
+                                    ),
+                                },
+                                FlightMode::Angle => control::Command::Angle {
+                                    throttle: channels[2],
+                                    angle: Vector3::new(
+                                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
+                                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
+                                        US_TO_NEG_ONE_ONE.map(channels[2] as f32) * 45.0,
+                                    ),
+                                },
+                            }
+                        } else {
+                            control::Command::Disarmed
+                        };
+
+                        CHANNELS.set(channels);
                     }
                     crsf::Packet::LinkStatistics(ls) => {
                         let link_stats = LinkStats {
@@ -58,13 +107,12 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
 
         if result.is_err() {
             parser.reset();
-            defmt::error!("failed to read from uart");
-            continue;
+            defmt::warn!("failed to read from uart");
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, defmt::Format)]
 pub struct LinkStats {
     pub uplink_link_quality: u8,
     pub uplink_rssi: u8,
@@ -109,4 +157,52 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
 
 fn crsf_read_raw_rc(raw: u16) -> u16 {
     ((raw as u32) * 1024 / 1639 + 881) as u16
+}
+
+enum FlightMode {
+    Manual,
+    Rate,
+    Angle,
+}
+
+struct FlightModeManager {
+    rate_mode_condition: ChannelCondition,
+    angle_mode_condition: ChannelCondition,
+}
+
+impl FlightModeManager {
+    pub fn update(&mut self, channels: &[u16; 16]) -> FlightMode {
+        self.rate_mode_condition.update(channels);
+        self.angle_mode_condition.update(channels);
+        if self.angle_mode_condition.state {
+            FlightMode::Angle
+        } else if self.rate_mode_condition.state {
+            FlightMode::Rate
+        } else {
+            FlightMode::Manual
+        }
+    }
+}
+
+struct ChannelCondition {
+    channel_idx: u8,
+    range: RangeInclusive<u16>,
+    state: bool,
+}
+
+impl ChannelCondition {
+    fn update(&mut self, channels: &[u16; 16]) -> Option<bool> {
+        let value = channels[self.channel_idx as usize];
+        match self.state {
+            false if self.range.contains(&value) => {
+                self.state = true;
+                Some(self.state)
+            }
+            true if !self.range.contains(&value) => {
+                self.state = false;
+                Some(self.state)
+            }
+            _ => None,
+        }
+    }
 }

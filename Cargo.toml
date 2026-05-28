@@ -18,20 +18,20 @@ embedded-io-async = "0.7.0"
 embedded-storage-async = "0.4.1"
 embedded-sdmmc = { version = "0.9.0", default-features = false, features = ["defmt-log"] }
 
-embassy-executor = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
-embassy-rp = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["defmt", "rp235xb", "time-driver", "unstable-pac"] }
-embassy-time = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-embedded-hal = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
-embassy-sync = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
-embassy-futures = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
-embassy-usb = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
-# embassy-executor = { path = "../embassy/embassy-executor", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
-# embassy-rp = { path = "../embassy/embassy-rp", features = ["defmt", "rp235xb", "time-driver", "unstable-pac"] }
-# embassy-time = { path = "../embassy/embassy-time", features = ["defmt", "defmt-timestamp-uptime"] }
-# embassy-embedded-hal = { path = "../embassy/embassy-embedded-hal" }
-# embassy-sync = { path = "../embassy/embassy-sync" }
-# embassy-futures = { path = "../embassy/embassy-futures" }
-# embassy-usb = { path = "../embassy/embassy-usb" }
+# embassy-executor = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+# embassy-rp = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["defmt", "rp235xb", "time-driver", "unstable-pac"] }
+# embassy-time = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["defmt", "defmt-timestamp-uptime"] }
+# embassy-embedded-hal = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+# embassy-sync = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+# embassy-futures = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+# embassy-usb = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+embassy-executor = { path = "../embassy/embassy-executor", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-rp = { path = "../embassy/embassy-rp", features = ["defmt", "rp235xb", "time-driver", "unstable-pac"] }
+embassy-time = { path = "../embassy/embassy-time", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-embedded-hal = { path = "../embassy/embassy-embedded-hal" }
+embassy-sync = { path = "../embassy/embassy-sync" }
+embassy-futures = { path = "../embassy/embassy-futures" }
+embassy-usb = { path = "../embassy/embassy-usb" }
 
 defmt = "1.0.1"
 defmt-rtt = { version = "1.1.0", features = ["disable-blocking-mode"] }

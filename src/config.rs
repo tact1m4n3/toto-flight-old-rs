@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use embassy_sync::{channel::Channel, once_lock::OnceLock};
+use embassy_sync::channel::Channel;
 use embedded_storage_async::nor_flash::NorFlash;
 use nalgebra::{Matrix3, Vector3};
 use sequential_storage::{
@@ -11,33 +11,33 @@ use sequential_storage::{
 pub use sequential_storage::Error;
 
 use crate::{
-    RawMutex,
+    MAX_MOTOR_OUTPUTS, MAX_SERVO_OUTPUTS, RawMutex,
     utils::{NalgebraMatrix3Ext, NalgebraVec3Ext},
 };
 
-const BUFFER_SIZE: usize = 64;
+const BUFFER_SIZE: usize = 128;
 
-pub static INITIAL_CONFIG: OnceLock<FullConfig> = OnceLock::new();
 pub static UPDATE_CONFIG: Channel<RawMutex, ConfigItem, 4> = Channel::new();
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ConfigItem {
     BoardForwardAngle(f32),
     ImuCalibration(ImuCalibration),
     BoardOrientation(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
-    ServoConfig { index: u8, config: ServoConfig },
+    ServoMixerConfig { index: u8, config: ServoMixerConfig },
 }
 
-pub struct FullConfig {
+pub struct Config {
     pub board_forward_angle: f32,
     pub imu_calibration: ImuCalibration,
     pub board_orientation: Matrix3<f32>,
     pub rate_controller_config: RateControllerConfig,
-    pub servos_config: [ServoConfig; 5],
+    pub motors_config: [MotorMixerConfig; MAX_MOTOR_OUTPUTS],
+    pub servos_config: [ServoMixerConfig; MAX_SERVO_OUTPUTS],
 }
 
-impl Default for FullConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             board_forward_angle: 0.0,
@@ -64,49 +64,51 @@ impl Default for FullConfig {
                     kff: 40.0,
                 },
             },
-            servos_config: [ServoConfig {
-                mid_point_us: 1500,
-                min_us: 1000,
-                max_us: 2000,
+            motors_config: [MotorMixerConfig {
+                trim_min_us: 1000,
+                trim_max_us: 2000,
                 mixer_gain: Vector3::ZEROS,
-            }; 5],
+            }; MAX_MOTOR_OUTPUTS],
+            servos_config: [ServoMixerConfig {
+                mid_point_us: 1500,
+                trim_min_us: 1000,
+                trim_max_us: 2000,
+                mixer_gain: Vector3::ZEROS,
+            }; MAX_SERVO_OUTPUTS],
         }
     }
 }
 
-pub async fn task<F: NorFlash>(flash: F, range: Range<u32>) {
-    let mut storage = Storage::new(flash, range);
-    let config = match storage.read_full_config().await {
-        Ok(config) => config,
-        Err(Error::Corrupted {}) => {
-            defmt::warn!("config in flash is corrupted. erasing all config");
-            storage.inner.erase_all().await.ok();
-            FullConfig::default()
-        }
-        Err(err) => panic!(
-            "unexpected error while reading config from flash: {:?}",
-            err
-        ),
-    };
-    INITIAL_CONFIG.init(config).ok();
-
-    loop {
-        // TODO: only receive while we are not armed
-        let config_item = UPDATE_CONFIG.receive().await;
-        if storage.update_config(config_item).await.is_err() {
-            defmt::error!("failed to update config in flash");
-        }
-    }
-}
-
-struct Storage<F: NorFlash> {
+pub struct Storage<F: NorFlash> {
     inner: MapStorage<StorageKey, F, NoCache>,
 }
 
 impl<F: NorFlash> Storage<F> {
-    fn new(flash: F, range: Range<u32>) -> Storage<F> {
+    pub fn new(flash: F, range: Range<u32>) -> Storage<F> {
         Self {
             inner: MapStorage::new(flash, MapConfig::new(range), NoCache),
+        }
+    }
+
+    pub async fn read(&mut self) -> Result<Config, Error<F::Error>> {
+        match self.read_inner().await {
+            Ok(config) => Ok(config),
+            Err(Error::Corrupted {}) => {
+                defmt::warn!("config in flash is corrupted. erasing all config");
+                self.inner.erase_all().await.ok();
+                Ok(Config::default())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn run(&mut self) {
+        loop {
+            // TODO: only receive while we are not armed
+            let config_item = UPDATE_CONFIG.receive().await;
+            if self.update_config(config_item).await.is_err() {
+                defmt::error!("failed to update config in flash");
+            }
         }
     }
 
@@ -140,7 +142,7 @@ impl<F: NorFlash> Storage<F> {
                 )
                 .await?;
             }
-            ConfigItem::ServoConfig { index, config } => {
+            ConfigItem::ServoMixerConfig { index, config } => {
                 self.raw_write(
                     &StorageKey::ServoConfig { index },
                     &StorageValue::ServoConfig(config),
@@ -152,28 +154,28 @@ impl<F: NorFlash> Storage<F> {
         Ok(())
     }
 
-    async fn read_full_config(&mut self) -> Result<FullConfig, Error<F::Error>> {
-        let mut config = FullConfig::default();
+    async fn read_inner(&mut self) -> Result<Config, Error<F::Error>> {
+        let mut cfg = Config::default();
 
         match self.raw_read(&StorageKey::BoardForwardAngle).await? {
-            Some(StorageValue::BoardForwardAngle(bfa)) => config.board_forward_angle = bfa,
+            Some(StorageValue::BoardForwardAngle(bfa)) => cfg.board_forward_angle = bfa,
             Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
             None => (),
         };
 
         match self.raw_read(&StorageKey::ImuCalibration).await? {
-            Some(StorageValue::ImuCalibration(imu_calib)) => config.imu_calibration = imu_calib,
+            Some(StorageValue::ImuCalibration(imu_calib)) => cfg.imu_calibration = imu_calib,
             Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
             None => (),
         };
 
         match self.raw_read(&StorageKey::RateControllerConfig).await? {
-            Some(StorageValue::RateControllerConfig(rcc)) => config.rate_controller_config = rcc,
+            Some(StorageValue::RateControllerConfig(rcc)) => cfg.rate_controller_config = rcc,
             Some(_) => return Err(Error::Corrupted {}), // If this configuration has the wrong type
             None => (),
         };
 
-        for (i, servo_config) in config.servos_config.iter_mut().enumerate() {
+        for (i, servo_config) in cfg.servos_config.iter_mut().enumerate() {
             match self
                 .raw_read(&StorageKey::ServoConfig { index: i as u8 })
                 .await?
@@ -184,7 +186,7 @@ impl<F: NorFlash> Storage<F> {
             };
         }
 
-        Ok(config)
+        Ok(cfg)
     }
 
     async fn raw_read(
@@ -234,21 +236,6 @@ impl Key for StorageKey {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ConfigAxis {
-    Roll,
-    Pitch,
-    Yaw,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PidControllerParamKind {
-    Kp,
-    Ki,
-    Kd,
-    Kff,
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum StorageValue {
     CraftName(heapless::String<16>),
@@ -256,7 +243,7 @@ pub enum StorageValue {
     ImuCalibration(ImuCalibration),
     BoardOrientation(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
-    ServoConfig(ServoConfig),
+    ServoConfig(ServoMixerConfig),
 }
 
 impl<'a> PostcardValue<'a> for StorageValue {}
@@ -270,22 +257,29 @@ pub struct ImuCalibration {
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct RateControllerConfig {
-    roll: RateControllerAxisConfig,
-    pitch: RateControllerAxisConfig,
-    yaw: RateControllerAxisConfig,
+    pub roll: RateControllerAxisConfig,
+    pub pitch: RateControllerAxisConfig,
+    pub yaw: RateControllerAxisConfig,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct RateControllerAxisConfig {
-    kp: f32,
-    ki: f32,
-    kff: f32,
+    pub kp: f32,
+    pub ki: f32,
+    pub kff: f32,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct ServoConfig {
-    mid_point_us: u16,
-    min_us: u16,
-    max_us: u16,
-    mixer_gain: Vector3<f32>,
+pub struct MotorMixerConfig {
+    pub trim_min_us: i16,
+    pub trim_max_us: i16,
+    pub mixer_gain: Vector3<f32>,
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct ServoMixerConfig {
+    pub mid_point_us: i16,
+    pub trim_min_us: i16,
+    pub trim_max_us: i16,
+    pub mixer_gain: Vector3<f32>,
 }
