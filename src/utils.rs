@@ -170,10 +170,7 @@ impl<M: RawMutex, T: Copy> SyncWatch<M, T> {
     }
 
     pub fn set(&self, new_value: T) {
-        self.state.lock(|state| {
-            *state.borrow_mut() = new_value;
-        });
-        self.current_version.fetch_add(1, Ordering::Release);
+        self.state.lock(|state| *state.borrow_mut() = new_value);
     }
 }
 

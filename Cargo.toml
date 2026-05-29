@@ -43,11 +43,11 @@ bitflags = "2.11.0"
 
 fixed = "1.30.0"
 libm = { version = "0.2.16", default-features = false }
+num-traits = { version = "0.2.15", default-features = false, features = ["libm"] }
 nalgebra = { version = "0.34.1", default-features = false, features = ["libm", "serde-serialize-no-std"] }
 
 crsf = { version = "3.0.0", features = ["defmt"], git = "https://github.com/tact1m4n3/crsf-rs" }
 ublox = { version = "0.10.0", default-features = false, features = ["ubx_proto33"] }
-eskf_rs = { version = "0.6.0", git = "https://github.com/peterkrull/eskf-rs", features = ["no_std", "cov-joseph"] }
 
 ina226-tp = { version = "0.4.1", features = ["async"] }
 

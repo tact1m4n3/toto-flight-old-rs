@@ -30,8 +30,8 @@ use toto_flight::{
     drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b},
 };
 
-const FLASH_SIZE: usize = 16 * 1024 * 1024;
-const FLASH_STORAGE_RANGE: Range<u32> = 15 * 1024 * 1024..16 * 1024 * 1024; // store in the last megabyte
+const FLASH_SIZE: u32 = 16 * 1024 * 1024;
+const FLASH_STORAGE_RANGE: Range<u32> = FLASH_SIZE - 4 * 1024..FLASH_SIZE; // store in the last 4 killobytes
 
 type I2cBus = i2c::I2c<'static, I2C0, i2c::Async>;
 type SharedI2cBus = AsyncMutex<CriticalSectionRawMutex, I2cBus>;
@@ -45,13 +45,13 @@ type ImuSpiDevice = ExclusiveDevice<
 type ImuInterruptPin = gpio::Input<'static>;
 type ImuSensor = Lsm6dsv16b<ImuSpiDevice>;
 
-type Flash = flash::Flash<'static, FLASH, flash::Blocking, FLASH_SIZE>;
-type AsyncFlash = BlockingAsync<flash::Flash<'static, FLASH, flash::Blocking, FLASH_SIZE>>;
+type Flash = flash::Flash<'static, FLASH, flash::Blocking, { FLASH_SIZE as usize }>;
+type AsyncFlash =
+    BlockingAsync<flash::Flash<'static, FLASH, flash::Blocking, { FLASH_SIZE as usize }>>;
 type Storage = toto_flight::config::Storage<AsyncFlash>;
 
 type BatterySensor = Ina226<SharedI2cDevice>;
 
-type Control = toto_flight::control::Control<1, 2>;
 type Outputs =
     toto_flight::control::Outputs<1, 2, pwm::PwmOutput<'static>, pwm::PwmOutput<'static>>;
 
@@ -276,13 +276,10 @@ async fn main(thread_spawner: Spawner) -> ! {
     let battery_sensor = BatterySensor::new(i2c_device.clone()).await.unwrap();
 
     let flash = BlockingAsync::new(Flash::new_blocking(r.flash.flash));
-
     let mut storage = toto_flight::config::Storage::new(flash, FLASH_STORAGE_RANGE);
 
     static CONFIG: StaticCell<Config> = StaticCell::new();
     let cfg = CONFIG.init(storage.read().await.unwrap());
-
-    let control = Control::new(cfg);
 
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
     let high_prio_spawner = HIGH_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
@@ -291,8 +288,9 @@ async fn main(thread_spawner: Spawner) -> ! {
     realtime_spawner.spawn(imu_interrupt_listener_task(imu_interrupt_pin).unwrap());
     realtime_spawner.spawn(imu_read_task(cfg, imu_sensor).unwrap());
     realtime_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
-    realtime_spawner.spawn(control_task(control, outputs).unwrap());
+    realtime_spawner.spawn(control_task(cfg, outputs).unwrap());
 
+    high_prio_spawner.spawn(fusion_task().unwrap());
     high_prio_spawner.spawn(gps_task(gps_uart_rx).unwrap());
 
     low_prio_spawner.spawn(battery_task(battery_sensor).unwrap());
@@ -344,6 +342,32 @@ async fn main(thread_spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
+async fn battery_task(battery_sensor: BatterySensor) {
+    toto_flight::battery::task(battery_sensor).await;
+}
+
+#[embassy_executor::task]
+async fn control_task(cfg: &'static Config, outputs: Outputs) {
+    let control = toto_flight::control::Control::new(cfg);
+    control.run(outputs).await;
+}
+
+#[embassy_executor::task]
+async fn config_task(mut storage: Storage) {
+    storage.run().await;
+}
+
+#[embassy_executor::task]
+async fn fusion_task() {
+    toto_flight::fusion::task().await;
+}
+
+#[embassy_executor::task]
+async fn gps_task(uart_rx: uart::BufferedUartRx) {
+    toto_flight::gps::task(uart_rx).await;
+}
+
+#[embassy_executor::task]
 async fn imu_interrupt_listener_task(pin: ImuInterruptPin) {
     toto_flight::imu::task_interrupt_listener(pin).await;
 }
@@ -364,28 +388,8 @@ async fn receiver_read_task(uart_rx: uart::BufferedUartRx) {
 }
 
 #[embassy_executor::task]
-async fn control_task(control: Control, outputs: Outputs) {
-    control.run(outputs).await;
-}
-
-#[embassy_executor::task]
 async fn receiver_telemetry_task(uart_tx: uart::BufferedUartTx) {
     toto_flight::receiver::task_telemetry(uart_tx).await;
-}
-
-#[embassy_executor::task]
-async fn gps_task(uart_rx: uart::BufferedUartRx) {
-    toto_flight::gps::task(uart_rx).await;
-}
-
-#[embassy_executor::task]
-async fn battery_task(battery_sensor: BatterySensor) {
-    toto_flight::battery::task(battery_sensor).await;
-}
-
-#[embassy_executor::task]
-async fn config_task(mut storage: Storage) {
-    storage.run().await;
 }
 
 #[defmt::panic_handler]

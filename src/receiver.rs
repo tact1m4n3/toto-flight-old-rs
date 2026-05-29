@@ -32,7 +32,7 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
         },
     };
 
-    let mut parser: crsf::Parser = crsf::Parser::new(crsf::ParserConfig::default());
+    let mut parser = crsf::Parser::new(crsf::ParserConfig::default());
 
     loop {
         let result = read_process_and_consume(&mut reader, |data| {
@@ -53,7 +53,7 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                         arm_switch.update(&channels);
                         let flight_mode = flight_mode_manager.update(&channels);
 
-                        if arm_switch.state {
+                        let command = if arm_switch.state {
                             match flight_mode {
                                 FlightMode::Manual => control::Command::Manual {
                                     throttle: channels[2],
@@ -73,11 +73,8 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                                 },
                                 FlightMode::Angle => control::Command::Angle {
                                     throttle: channels[2],
-                                    angle: Vector3::new(
-                                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
-                                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
-                                        US_TO_NEG_ONE_ONE.map(channels[2] as f32) * 45.0,
-                                    ),
+                                    roll_angle: US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
+                                    pitch_angle: US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
                                 },
                             }
                         } else {
@@ -85,6 +82,8 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                         };
 
                         CHANNELS.set(channels);
+
+                        control::RC_COMMAND.signal(command);
                     }
                     crsf::Packet::LinkStatistics(ls) => {
                         let link_stats = LinkStats {

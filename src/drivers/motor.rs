@@ -2,7 +2,7 @@ use embedded_hal::pwm::SetDutyCycle;
 
 pub trait Motor {
     type Error;
-    // TODO: What should happen in case of errors.
+    // TODO: What should happen in case of errors?
     fn write(&mut self, us: u16);
 }
 

@@ -729,15 +729,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "eskf_rs"
-version = "0.6.0"
-source = "git+https://github.com/peterkrull/eskf-rs#454f7b2843820dfaae7f2b85108b47852a6d91b4"
-dependencies = [
- "nalgebra",
- "num-traits",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2064,13 +2055,13 @@ dependencies = [
  "embedded-io-async",
  "embedded-sdmmc",
  "embedded-storage-async",
- "eskf_rs",
  "fixed",
  "futures",
  "heapless 0.9.3",
  "ina226-tp",
  "libm",
  "nalgebra",
+ "num-traits",
  "panic-probe",
  "postcard",
  "sequential-storage",
