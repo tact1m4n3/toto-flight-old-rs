@@ -18,7 +18,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
         let data = match sensor.read().await {
             Ok(data) => data,
             Err(_) => {
-                defmt::warn!("failed to read battery sensor");
+                log::warn!("failed to read battery sensor");
                 continue;
             }
         };

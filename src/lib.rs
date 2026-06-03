@@ -6,7 +6,6 @@ pub(crate) type RawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRaw
 pub const MAX_MOTOR_OUTPUTS: usize = 2;
 pub const MAX_SERVO_OUTPUTS: usize = 5;
 
-pub mod algorithms;
 pub mod battery;
 pub mod config;
 pub mod control;
@@ -15,4 +14,5 @@ pub mod fusion;
 pub mod gps;
 pub mod imu;
 pub mod receiver;
+pub mod usb_interface;
 pub mod utils;

@@ -3,6 +3,7 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+use embassy_futures::select::{Either, select};
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker};
 use futures::join;
@@ -11,7 +12,7 @@ use num_traits::Float;
 
 use crate::{
     RawMutex,
-    config::{Config, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
+    config::{self, Config, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::Motor,
     fusion, imu,
     utils::{GuardedRefCell, NalgebraVec3Ext},
@@ -23,6 +24,8 @@ const FAILSAFE_RECOVERY_MIN_COMMAND_RATE: Duration = Duration::from_hz(10);
 const FAILSAFE_RECOVERY_PERIOD: Duration = Duration::from_millis(200);
 
 pub static RC_COMMAND: Signal<RawMutex, Command> = Signal::new();
+
+pub static AUTO_TUNE: Signal<RawMutex, bool> = Signal::new();
 
 pub enum Command {
     Disarmed,
@@ -41,12 +44,6 @@ pub enum Command {
     },
 }
 
-impl Command {
-    fn is_disarmed(&self) -> bool {
-        matches!(self, Command::Disarmed)
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct Outputs<const MOTORS: usize, const SERVOS: usize, M: Motor, S: Motor> {
     pub motors: [M; MOTORS],
@@ -58,7 +55,7 @@ pub struct Control<const MOTORS: usize, const SERVOS: usize> {
 }
 
 struct State<const MOTORS: usize, const SERVOS: usize> {
-    armed: bool,
+    arm_state: ArmState,
 
     command: Command,
 
@@ -74,7 +71,7 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
     pub fn new(cfg: &'static Config) -> Self {
         Self {
             state: GuardedRefCell::new(State {
-                armed: false,
+                arm_state: ArmState::Disarmed,
 
                 command: Command::Disarmed,
 
@@ -97,12 +94,13 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
             self.command_guardian(),
             self.slow_loop(),
             self.fast_loop(outputs),
-            // self.calibration_loop()
+            self.auto_tune_loop(),
         );
     }
 
     async fn command_guardian(&self) {
         'failsafe_start: loop {
+            log::info!("in failsafe officially");
             // Disarm on failsafe
             self.state.guarded_mut(|state| {
                 state.command = Command::Disarmed;
@@ -119,12 +117,14 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                 {
                     Ok(_) => {
                         if let Some(good_signal_timeout_start) = maybe_good_signal_timeout_start
-                            && good_signal_timeout_start - Instant::now()
+                            && Instant::now() - good_signal_timeout_start
                                 >= FAILSAFE_RECOVERY_PERIOD
                         {
+                            log::info!("exiting failsafe");
                             // We can exit failsafe now
                             break;
-                        } else {
+                        } else if maybe_good_signal_timeout_start.is_none() {
+                            log::info!("good signal");
                             maybe_good_signal_timeout_start = Some(Instant::now());
                         }
                     }
@@ -142,12 +142,15 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                     });
                 }
 
+                log::info!("failsafe detected first stage");
+
                 // Maybe we are in failsafe, do we receive any more packets in this recovery period?
                 let recovery_deadline = Instant::now().add(FAILSAFE_MONITOR_PERIOD);
                 if embassy_time::with_deadline(recovery_deadline, RC_COMMAND.wait())
                     .await
                     .is_err()
                 {
+                    log::info!("failsafe detected second stage");
                     // No command received in the failsafe monitor period, so we enter failsafe again
                     continue 'failsafe_start;
                 }
@@ -166,18 +169,10 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
 
             self.state.guarded_mut(|state| {
                 // Arm state transitions
-                if !state.armed
-                    && !state.command.is_disarmed()
-                    && let Ok(()) = ArmBlocker::arm()
-                {
-                    state.armed = true;
-                } else if state.armed && state.command.is_disarmed() {
-                    ArmBlocker::disarm();
-                    state.armed = false;
-                }
+                state.arm_state.update(&state.command);
 
                 // Will be `None` only if the passthrough rate_control from the slow loop is late
-                let maybe_manual_control = if state.armed {
+                let maybe_manual_control = if state.arm_state.is_armed() {
                     match state.command {
                         Command::Disarmed => Some(ManualControl::IDLE),
                         Command::Manual { throttle, throw } => {
@@ -220,7 +215,7 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
             ticker.next().await;
 
             self.state.guarded_mut(|state| {
-                state.slow_loop_target_rate = if state.armed {
+                state.slow_loop_target_rate = if state.arm_state.is_armed() {
                     match state.command {
                         Command::Angle {
                             throttle,
@@ -246,7 +241,64 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
         }
     }
 
-    // async fn calibration_loop(&self) {}
+    async fn auto_tune_loop(&self) {
+        // TODO: feedback on which state is active through osd or telemetry
+
+        loop {
+            // Waiting to start mid point calibration, requires the drone to be armed
+            loop {
+                if AUTO_TUNE.wait().await
+                    && self.state.guarded_ref(|state| state.arm_state.is_armed())
+                {
+                    break;
+                }
+            }
+
+            // Mid point calibration
+            {
+                let mut ticker = Ticker::every(Duration::from_hz(1));
+                loop {
+                    match select(AUTO_TUNE.wait(), ticker.next()).await {
+                        Either::First(enable) if !enable => break,
+                        _ => (),
+                    }
+
+                    self.state.guarded_mut(|state| {
+                        if state.arm_state.is_armed() {
+                            let i_term = state.rate_controller.i_term();
+                            state.rate_controller.reset_i_term();
+
+                            // this should have no side-effect as the i_term is reset
+                            for cfg in state.servo_mixer_config.iter_mut() {
+                                cfg.mid_point_us += i_term.dot(&cfg.mixer_gain) as i16;
+                            }
+                        }
+                    });
+                }
+            }
+
+            // TODO: add auto ff tuning
+
+            // Waiting for config to be applied, requires the drone to be disarmed
+            loop {
+                if AUTO_TUNE.wait().await
+                    && !self.state.guarded_ref(|state| state.arm_state.is_armed())
+                {
+                    break;
+                }
+            }
+
+            let servo_mixer_config = self.state.guarded_ref(|state| state.servo_mixer_config);
+            for (i, cfg) in servo_mixer_config.iter().enumerate() {
+                config::UPDATE_CONFIG
+                    .send(config::ConfigItem::ServoMixerConfig {
+                        index: i as u8,
+                        config: *cfg,
+                    })
+                    .await;
+            }
+        }
+    }
 }
 
 static ARM_BLOCK: AtomicU32 = AtomicU32::new(0);
@@ -306,6 +358,42 @@ impl ArmBlocker {
 impl Drop for ArmBlocker {
     fn drop(&mut self) {
         assert!(ARM_BLOCK.fetch_sub(1, Ordering::Release) != 0);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArmState {
+    Disarmed,
+    Armed,
+    ArmFailed,
+}
+
+impl ArmState {
+    fn is_armed(self) -> bool {
+        matches!(self, ArmState::Armed)
+    }
+
+    fn update(&mut self, command: &Command) {
+        match self {
+            ArmState::Disarmed => match command {
+                Command::Manual { throttle, .. }
+                | Command::Rate { throttle, .. }
+                | Command::Angle { throttle, .. } => {
+                    if *throttle < 1100 && ArmBlocker::arm().is_ok() {
+                        *self = ArmState::Armed;
+                    } else {
+                        *self = ArmState::ArmFailed;
+                    }
+                }
+                _ => (),
+            },
+            ArmState::Armed | ArmState::ArmFailed => {
+                if let Command::Disarmed = command {
+                    *self = ArmState::Disarmed;
+                    ArmBlocker::disarm();
+                }
+            }
+        };
     }
 }
 

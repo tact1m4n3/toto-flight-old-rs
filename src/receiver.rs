@@ -16,7 +16,7 @@ pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats
 pub async fn task_read<R: BufRead>(mut reader: R) {
     let mut arm_switch = ChannelCondition {
         channel_idx: 4,
-        range: 1500..=2000,
+        range: 1700..=2000,
         state: false,
     };
     let mut flight_mode_manager = FlightModeManager {
@@ -31,16 +31,22 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
             state: false,
         },
     };
+    let mut auto_tune_switch = ChannelCondition {
+        channel_idx: 6,
+        range: 1700..=2000,
+        state: false,
+    };
 
     let mut parser = crsf::Parser::new(crsf::ParserConfig::default());
 
     loop {
         let result = read_process_and_consume(&mut reader, |data| {
-            for result in parser.iter_packets(data) {
+            let mut iter = parser.iter_packets(data);
+            while let Some(result) = iter.next() {
                 let packet = match result {
                     Ok(packet) => packet,
-                    Err(_) => {
-                        defmt::warn!("failed to parse crsf packet");
+                    Err(err) => {
+                        log::warn!("failed to parse crsf packet: {err}");
                         continue;
                     }
                 };
@@ -51,7 +57,12 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
 
                         arm_switch.update(&channels);
+
                         let flight_mode = flight_mode_manager.update(&channels);
+
+                        if let Some(auto_tune) = auto_tune_switch.update(&channels) {
+                            control::AUTO_TUNE.signal(auto_tune);
+                        }
 
                         let command = if arm_switch.state {
                             match flight_mode {
@@ -68,7 +79,7 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                                     rate: Vector3::new(
                                         US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
                                         US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
-                                        US_TO_NEG_ONE_ONE.map(channels[2] as f32) * 45.0,
+                                        US_TO_NEG_ONE_ONE.map(channels[3] as f32) * 45.0,
                                     ),
                                 },
                                 FlightMode::Angle => control::Command::Angle {
@@ -104,14 +115,14 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
         })
         .await;
 
-        if result.is_err() {
+        if let Err(err) = result {
             parser.reset();
-            defmt::warn!("failed to read from uart");
+            log::warn!("failed to read from uart {err}");
         }
     }
 }
 
-#[derive(Clone, Copy, defmt::Format)]
+#[derive(Clone, Copy, Debug)]
 pub struct LinkStats {
     pub uplink_link_quality: u8,
     pub uplink_rssi: u8,
@@ -148,7 +159,7 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
 
             let len = packet.dump(&mut buf).unwrap(); // this can't fail as we have a big enough buffer
             if writer.write_all(&buf[..len]).await.is_err() {
-                defmt::warn!("failed to write to uart");
+                log::warn!("failed to write to uart");
             }
         }
     }

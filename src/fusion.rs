@@ -1,9 +1,9 @@
+use ahrs::Ahrs;
 use embassy_time::{Duration, Ticker};
-use nalgebra::UnitQuaternion;
+use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::{
     RawMutex,
-    algorithms::madgwick::Madgwick,
     utils::{NalgebraQuatExt, SyncWatch},
 };
 
@@ -14,7 +14,7 @@ pub async fn task() {
     const FREQ_HZ: u64 = 100;
     const DT: f32 = 1.0 / FREQ_HZ as f32;
 
-    let mut filter = Madgwick::new(0.1);
+    let mut filter = ahrs::Madgwick::new(DT, 0.1);
 
     let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
     loop {
@@ -22,10 +22,15 @@ pub async fn task() {
 
         let gyro = super::imu::GYRO.get();
         let accel = super::imu::ACCEL.get();
+        let gyro_nwu = Vector3::new(gyro.x, -gyro.y, -gyro.z);
+        let accel_nwu = Vector3::new(accel.x, -accel.y, -accel.z);
 
         // TODO: If magnetometer reading is available, call update
-        filter.update_imu(&gyro, &accel, DT);
+        let quat = match filter.update_imu(&gyro_nwu, &accel_nwu) {
+            Ok(quat) => quat,
+            Err(_) => filter.update_gyro(&gyro_nwu),
+        };
 
-        ATTITUDE.set(filter.quat);
+        ATTITUDE.set(*quat);
     }
 }

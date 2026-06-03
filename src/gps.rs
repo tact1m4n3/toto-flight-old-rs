@@ -46,13 +46,14 @@ pub async fn task<R: BufRead>(mut reader: R) {
                                     fix_type: pvt.fix_type().into(),
                                     vertical_velocity: pvt.vel_down() as f32,
                                 };
+                                // defmt::info!("received packet: {}", data);
                                 DATA.set(data);
                             }
                             _ => {}
                         }
                     }
                     Err(_) => {
-                        defmt::warn!("gps: failed to parse packet");
+                        log::warn!("gps: failed to parse packet");
                     }
                 }
             }
@@ -60,12 +61,12 @@ pub async fn task<R: BufRead>(mut reader: R) {
         .await;
 
         if result.is_err() {
-            defmt::warn!("failed to read from uart");
+            log::warn!("failed to read from uart");
         };
     }
 }
 
-#[derive(Clone, Copy, defmt::Format)]
+#[derive(Clone, Copy, Debug)]
 pub struct Data {
     /// Latitude in degrees (positive = North)
     pub latitude: f64,
@@ -91,7 +92,7 @@ pub struct Data {
     pub vertical_velocity: f32,
 }
 
-#[derive(Clone, Copy, defmt::Format)]
+#[derive(Clone, Copy, Debug)]
 pub enum FixType {
     NoFix,
     DeadReckoningOnly,
