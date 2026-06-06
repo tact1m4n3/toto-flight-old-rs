@@ -26,42 +26,34 @@ pub async fn task<R: BufRead>(mut reader: R) {
         let result = read_process_and_consume(&mut reader, |data| {
             let mut packet_iter = parser.consume_ubx(data);
             while let Some(result) = packet_iter.next() {
-                match result {
-                    Ok(packet) => {
-                        let UbxPacket::Proto33(ref packet) = packet;
+                if let Ok(packet) = result {
+                    let UbxPacket::Proto33(ref packet) = packet;
 
-                        #[allow(clippy::single_match)]
-                        match packet {
-                            PacketRef::NavPvt(pvt) => {
-                                let data = Data {
-                                    latitude: pvt.latitude(),
-                                    longitude: pvt.longitude(),
-                                    altitude: pvt.height_msl() as f32,
-                                    h_acc: pvt.horizontal_accuracy() as f32,
-                                    v_acc: pvt.vertical_accuracy() as f32,
-                                    speed: pvt.ground_speed_2d() as f32,
-                                    heading: pvt.heading_motion() as f32,
-                                    num_sat: pvt.num_satellites(),
-                                    hdop: pvt.pdop() as f32,
-                                    fix_type: pvt.fix_type().into(),
-                                    vertical_velocity: pvt.vel_down() as f32,
-                                };
-                                // defmt::info!("received packet: {}", data);
-                                DATA.set(data);
-                            }
-                            _ => {}
-                        }
+                    if let PacketRef::NavPvt(pvt) = packet {
+                        let data = Data {
+                            latitude: pvt.latitude(),
+                            longitude: pvt.longitude(),
+                            altitude: pvt.height_msl() as f32,
+                            h_acc: pvt.horizontal_accuracy() as f32,
+                            v_acc: pvt.vertical_accuracy() as f32,
+                            speed: pvt.ground_speed_2d() as f32,
+                            heading: pvt.heading_motion() as f32,
+                            num_sat: pvt.num_satellites(),
+                            hdop: pvt.pdop() as f32,
+                            fix_type: pvt.fix_type().into(),
+                            vertical_velocity: pvt.vel_down() as f32,
+                        };
+                        DATA.set(data);
                     }
-                    Err(_) => {
-                        log::warn!("gps: failed to parse packet");
-                    }
+                } else {
+                    warn!("failed to parse ublox packet");
                 }
             }
         })
         .await;
 
         if result.is_err() {
-            log::warn!("failed to read from uart");
+            warn!("failed to read from uart");
         };
     }
 }

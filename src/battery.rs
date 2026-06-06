@@ -8,23 +8,20 @@ const FREQ_HZ: u64 = 10;
 const DT: f64 = 1.0 / FREQ_HZ as f64;
 
 pub async fn task<B: BatterySensor>(mut sensor: B) {
-    let mut prev_current = 0.0;
-    let mut capacity_used = 0.0;
+    let mut prev_current: f64 = 0.0;
+    let mut capacity_used: f64 = 0.0;
 
     let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
     loop {
         ticker.next().await;
 
-        let data = match sensor.read().await {
-            Ok(data) => data,
-            Err(_) => {
-                log::warn!("failed to read battery sensor");
-                continue;
-            }
+        let Ok(data) = sensor.read().await else {
+            warn!("failed to read battery sensor");
+            continue;
         };
 
         // trapezoidal integration
-        capacity_used += ((prev_current + data.current) / 2.0) * DT * 3600.0;
+        capacity_used += data.current.midpoint(prev_current) * DT / 3600.0;
         prev_current = data.current;
 
         DATA.set(Data {

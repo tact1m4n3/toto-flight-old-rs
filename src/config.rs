@@ -48,7 +48,7 @@ impl Config {
         let mut config = Config::default();
 
         config.craft_name.clear();
-        config.craft_name.push_str("Toto Plane").unwrap();
+        _ = config.craft_name.push_str("Toto Plane");
 
         config.board_forward_angle = 90.0f32.to_radians();
 
@@ -59,13 +59,13 @@ impl Config {
             mixer_gain: Vector3::ZEROS,
         };
         config.servos_config[0] = ServoMixerConfig {
-            mid_point_us: 1500,
+            mid_point_us: 1600,
             trim_min_us: 1200,
             trim_max_us: 1800,
             mixer_gain: Vector3::new(-1.0, 1.0, 0.0),
         };
         config.servos_config[1] = ServoMixerConfig {
-            mid_point_us: 1500,
+            mid_point_us: 1450,
             trim_min_us: 1200,
             trim_max_us: 1800,
             mixer_gain: Vector3::new(-1.0, -1.0, 0.0),
@@ -134,7 +134,7 @@ impl<F: NorFlash> Storage<F> {
         match self.read_inner().await {
             Ok(config) => Ok(config),
             Err(Error::Corrupted {}) => {
-                log::warn!("config in flash is corrupted. erasing all config");
+                warn!("config in flash is corrupted. erasing all config");
                 self.inner.erase_all().await.ok();
                 Ok(Config::default())
             }
@@ -144,14 +144,13 @@ impl<F: NorFlash> Storage<F> {
 
     pub async fn run(&mut self) {
         loop {
-            // TODO: only receive while we are not armed
             let config_item = UPDATE_CONFIG.receive().await;
             if let Ok(_arm_guard) = ArmBlocker::new() {
                 if self.update_config(config_item).await.is_err() {
-                    log::error!("failed to update config in flash");
+                    error!("failed to store config in flash");
                 }
             } else {
-                log::warn!("config update dropped because craft is armed");
+                warn!("config update dropped because craft is armed");
             }
         }
     }
@@ -216,13 +215,13 @@ impl<F: NorFlash> Storage<F> {
             Some(StorageValue::BoardForwardAngle(bfa)) => cfg.board_forward_angle = bfa,
             Some(_) => return Err(Error::Corrupted {}),
             None => (),
-        };
+        }
 
         match self.raw_read(&StorageKey::ImuCalibration).await? {
             Some(StorageValue::ImuCalibration(imu_calib)) => cfg.imu_calibration = imu_calib,
             Some(_) => return Err(Error::Corrupted {}),
             None => (),
-        };
+        }
 
         match self.raw_read(&StorageKey::BoardOrientation).await? {
             Some(StorageValue::BoardOrientation(board_orientation)) => {
@@ -230,13 +229,13 @@ impl<F: NorFlash> Storage<F> {
             }
             Some(_) => return Err(Error::Corrupted {}),
             None => (),
-        };
+        }
 
         match self.raw_read(&StorageKey::RateControllerConfig).await? {
             Some(StorageValue::RateControllerConfig(rcc)) => cfg.rate_controller_config = rcc,
             Some(_) => return Err(Error::Corrupted {}),
             None => (),
-        };
+        }
 
         for (i, motor_config) in cfg.motors_config.iter_mut().enumerate() {
             match self
@@ -246,7 +245,7 @@ impl<F: NorFlash> Storage<F> {
                 Some(StorageValue::MotorConfig(mc)) => *motor_config = mc,
                 Some(_) => return Err(Error::Corrupted {}),
                 None => (),
-            };
+            }
         }
         for (i, servo_config) in cfg.servos_config.iter_mut().enumerate() {
             match self
@@ -256,7 +255,7 @@ impl<F: NorFlash> Storage<F> {
                 Some(StorageValue::ServoConfig(sc)) => *servo_config = sc,
                 Some(_) => return Err(Error::Corrupted {}),
                 None => (),
-            };
+            }
         }
 
         Ok(cfg)
@@ -321,7 +320,7 @@ pub enum StorageValue {
     ServoConfig(ServoMixerConfig),
 }
 
-impl<'a> PostcardValue<'a> for StorageValue {}
+impl PostcardValue<'_> for StorageValue {}
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImuCalibration {

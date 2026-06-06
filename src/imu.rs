@@ -29,16 +29,12 @@ pub async fn task_interrupt_listener<P: embedded_hal_async::digital::Wait>(mut i
 }
 
 pub async fn task_read<I: ImuSensor>(cfg: &'static Config, mut imu: I) {
-    log::info!("{:?} {}", cfg.imu_calibration, cfg.board_forward_angle);
     loop {
         TAKE_SAMPLE_SIGNAL.wait().await;
 
-        let data = match imu.read().await {
-            Ok(data) => data,
-            Err(_) => {
-                log::error!("failed to read imu");
-                continue;
-            }
+        let Ok(data) = imu.read().await else {
+            warn!("failed to read imu");
+            continue;
         };
 
         IMU_RAW_SAMPLE.signal(data);
@@ -62,7 +58,7 @@ pub async fn task_calibrate(cfg: &'static Config) {
         if let Ok(_guard) = ArmBlocker::new() {
             easy_calibration(cfg).await;
         } else {
-            log::warn!("ignoring imu calibration request because drone is armed");
+            warn!("ignoring imu calibration request because drone is armed");
         }
     }
 }

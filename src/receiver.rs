@@ -45,8 +45,8 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
             while let Some(result) = iter.next() {
                 let packet = match result {
                     Ok(packet) => packet,
-                    Err(err) => {
-                        log::warn!("failed to parse crsf packet: {err}");
+                    Err(_) => {
+                        warn!("failed to parse crsf packet");
                         continue;
                     }
                 };
@@ -115,9 +115,9 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
         })
         .await;
 
-        if let Err(err) = result {
+        if result.is_err() {
             parser.reset();
-            log::warn!("failed to read from uart {err}");
+            warn!("failed to read from uart");
         }
     }
 }
@@ -151,15 +151,16 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
         let mut buf: [u8; crsf::MAX_PACKET_LEN] = [0; crsf::MAX_PACKET_LEN];
 
         if let Some(battery) = battery_info_watcher.get_if_changed() {
-            let mut packet = crsf::BatterySensor::new();
-            packet.set_voltage(battery.voltage as u16); // already in mV
-            packet.set_current(battery.current as u16); // already in mA
-            packet.set_capacity_used(battery.capacity_used as u32); // already in mAh
-            packet.set_remaining(0); // we don't have this info
+            let packet = crsf::BatterySensor {
+                voltage: (battery.voltage * 10.0) as i16,    // already in mV
+                current: (battery.current / 10.0) as i16,    // already in mA
+                capacity_used: battery.capacity_used as u32, // already in mAh
+                remaining: 0,                                // we don't have this info
+            };
 
             let len = packet.dump(&mut buf).unwrap(); // this can't fail as we have a big enough buffer
             if writer.write_all(&buf[..len]).await.is_err() {
-                log::warn!("failed to write to uart");
+                warn!("failed to write to uart");
             }
         }
     }

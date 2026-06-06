@@ -170,7 +170,10 @@ impl<M: RawMutex, T: Copy> SyncWatch<M, T> {
     }
 
     pub fn set(&self, new_value: T) {
-        self.state.lock(|state| *state.borrow_mut() = new_value);
+        self.state.lock(|state| {
+            *state.borrow_mut() = new_value;
+            self.current_version.fetch_add(1, Ordering::Acquire);
+        });
     }
 }
 
@@ -199,7 +202,17 @@ pub async fn read_process_and_consume<R: BufRead, F: FnMut(&[u8])>(
     mut f: F,
 ) -> Result<(), R::Error> {
     let n = {
-        let data = reader.fill_buf().await?;
+        let data = match reader.fill_buf().await {
+            Ok(data) => data,
+            Err(e) => {
+                // If we fail to read, there is an edge case in which the uart
+                // interrupt maybe remains disabled and we don't read anything
+                // anymore.
+                // TODO: Inspect buffered uart implementation.
+                reader.consume(1);
+                return Err(e);
+            }
+        };
         f(data);
         data.len()
     };

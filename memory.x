@@ -1,7 +1,7 @@
 MEMORY {
-    /* Although the flight controller has 16 megabytes of flash we skip the
-     * last megabyte for persistent configuration. */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 15 * 1024K
+    /* Although the flight controller has 16 megabytes of flash we leave some
+    space for persistent configuration. */
+    FLASH : ORIGIN = 0x10000000, LENGTH = 16 * 1024K - 4 * 4K
     RAM : ORIGIN = 0x20000000, LENGTH = 512K
     SRAM8 : ORIGIN = 0x20080000, LENGTH = 4K
     SRAM9 : ORIGIN = 0x20081000, LENGTH = 4K

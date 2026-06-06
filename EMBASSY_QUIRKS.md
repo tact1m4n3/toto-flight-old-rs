@@ -1,1 +1,0 @@
-- When the buffered uart interrupt priority is less than the uart reader task, you get a deadlock (when an error occurs?)

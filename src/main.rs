@@ -1,8 +1,5 @@
 #![no_std]
 #![no_main]
-#![warn(clippy::pedantic)]
-#![warn(clippy::panic)]
-#![recursion_limit = "256"]
 
 use core::ops::Range;
 
@@ -16,11 +13,13 @@ use embassy_rp::{
     pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use fixed::FixedU16;
 use static_cell::StaticCell;
 
+#[cfg(feature = "defmt")]
+use defmt_rtt as _;
 use panic_probe as _;
 
 #[macro_use]
@@ -154,9 +153,6 @@ async fn main(thread_spawner: Spawner) -> ! {
 
     let p = embassy_rp::init(embassy_rp::config::Config::default());
     let r = split_resources!(p);
-
-    #[cfg(feature = "rtt-log")]
-    rtt_target::rtt_init_log!(log::LevelFilter::Info, rtt_target::ChannelMode::NoBlockSkip);
 
     // init interrupts
     interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P1); // realtime executor
@@ -301,6 +297,8 @@ async fn main(thread_spawner: Spawner) -> ! {
     let high_prio_spawner = HIGH_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
     let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_2);
 
+    info!("setup done. spawning tasks");
+
     realtime_spawner.spawn(imu_interrupt_listener_task(imu_interrupt_pin).unwrap());
     realtime_spawner.spawn(imu_read_task(cfg, imu_sensor).unwrap());
     realtime_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
@@ -326,33 +324,15 @@ async fn main(thread_spawner: Spawner) -> ! {
     // set SEVONPEND flag so that interrupts set the event flag even inside a critical section
     unsafe { cp.SCB.scr.modify(|reg| reg | 0x10) }
 
-    let mut last_tick_ticks: u32 = 0;
-    let mut idle_ticks: u32 = 0;
-    let mut last_tick_instant = Instant::now();
+    #[cfg(feature = "cpu-usage")]
+    let mut cpu_usage_tracker = toto_flight::cpu_usage::Tracker::new();
+
     loop {
-        // TODO: Add feature flag to disable cpu usage monitoring since it adds some overhead
-        let mut before: u32 = 0;
-        let mut after: u32 = 0;
-        critical_section::with(|_| {
-            before = cp.DWT.cyccnt.read();
-            cortex_m::asm::wfe();
-            after = cp.DWT.cyccnt.read();
-        });
-        idle_ticks += after.wrapping_sub(before);
+        #[cfg(feature = "cpu-usage")]
+        cpu_usage_tracker.on_idle(&mut cp);
 
-        let now_instant = Instant::now();
-        if now_instant - last_tick_instant > Duration::from_secs(1) {
-            let ticks_now = cp.DWT.cyccnt.read();
-            let tick_diff = ticks_now.wrapping_sub(last_tick_ticks);
-            let cpu_usage =
-                100u64.saturating_sub(u64::from(idle_ticks) * 100 / u64::from(tick_diff));
-
-            log::info!("cpu usage: {cpu_usage}%");
-
-            last_tick_instant = now_instant;
-            last_tick_ticks = ticks_now;
-            idle_ticks = 0;
-        }
+        #[cfg(not(feature = "cpu-usage"))]
+        cortex_m::asm::wfi();
     }
 }
 
@@ -421,4 +401,10 @@ async fn receiver_telemetry_task(uart_tx: uart::BufferedUartTx) {
 #[embassy_executor::task]
 async fn usb_interface_task(usb_driver: UsbDriver) {
     toto_flight::usb_interface::task(usb_driver).await;
+}
+
+#[cfg(feature = "defmt")]
+#[defmt::panic_handler]
+fn panic() -> ! {
+    cortex_m::asm::udf();
 }

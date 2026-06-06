@@ -135,35 +135,36 @@ where
         let gy = i16::from_le_bytes([buf[3], buf[4]]);
         let gz = i16::from_le_bytes([buf[5], buf[6]]);
 
-        let (ax, ay, az) = match ACCEL_AXES_ORDER_REVERSED {
-            false => (
+        let (ax, ay, az) = if ACCEL_AXES_ORDER_REVERSED {
+            (
                 // buf[7..=8]   = OUTX_L_A / OUTX_H_A  → accel X
                 // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
                 // buf[11..=12] = OUTZ_L_A / OUTZ_H_A  → accel Z
                 i16::from_le_bytes([buf[7], buf[8]]),
                 i16::from_le_bytes([buf[9], buf[10]]),
                 i16::from_le_bytes([buf[11], buf[12]]),
-            ),
-            true => (
+            )
+        } else {
+            (
                 // buf[7..=8]   = OUTZ_L_A / OUTZ_H_A  → accel Z
                 // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
                 // buf[11..=12] = OUTX_L_A / OUTX_H_A  → accel X
                 i16::from_le_bytes([buf[11], buf[12]]),
                 i16::from_le_bytes([buf[9], buf[10]]),
                 i16::from_le_bytes([buf[7], buf[8]]),
-            ),
+            )
         };
 
         Ok(super::Data {
             gyro: Vector3::new(
-                gx as f32 * GYRO_SCALE_DPS,
-                gy as f32 * GYRO_SCALE_DPS,
-                gz as f32 * GYRO_SCALE_DPS,
+                f32::from(gx) * GYRO_SCALE_DPS,
+                f32::from(gy) * GYRO_SCALE_DPS,
+                f32::from(gz) * GYRO_SCALE_DPS,
             ),
             accel: Vector3::new(
-                ax as f32 * ACCEL_SCALE_G,
-                ay as f32 * ACCEL_SCALE_G,
-                az as f32 * ACCEL_SCALE_G,
+                f32::from(ax) * ACCEL_SCALE_G,
+                f32::from(ay) * ACCEL_SCALE_G,
+                f32::from(az) * ACCEL_SCALE_G,
             ),
         })
     }

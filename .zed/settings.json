@@ -12,6 +12,7 @@
         "cargo": {
           "target": "thumbv8m.main-none-eabihf",
           "allTargets": false,
+          "features": ["defmt", "cpu-usage"],
         },
         "procMacro": {
           "enable": true,

@@ -71,7 +71,9 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
     pub fn new(cfg: &'static Config) -> Self {
         Self {
             state: GuardedRefCell::new(State {
-                arm_state: ArmState::Disarmed,
+                // Start in arm failed state to force the user to move the arm
+                // switch to disarm first, preventing accidental arming
+                arm_state: ArmState::ArmFailed,
 
                 command: Command::Disarmed,
 
@@ -100,7 +102,8 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
 
     async fn command_guardian(&self) {
         'failsafe_start: loop {
-            log::info!("in failsafe officially");
+            info!("we are in failsafe");
+
             // Disarm on failsafe
             self.state.guarded_mut(|state| {
                 state.command = Command::Disarmed;
@@ -120,17 +123,17 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                             && Instant::now() - good_signal_timeout_start
                                 >= FAILSAFE_RECOVERY_PERIOD
                         {
-                            log::info!("exiting failsafe");
                             // We can exit failsafe now
                             break;
                         } else if maybe_good_signal_timeout_start.is_none() {
-                            log::info!("good signal");
                             maybe_good_signal_timeout_start = Some(Instant::now());
                         }
                     }
                     Err(_) => maybe_good_signal_timeout_start = None,
                 }
             }
+
+            info!("failsafe has come to an end");
 
             loop {
                 // Receive command loop. No failsafe in sight
@@ -142,7 +145,7 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                     });
                 }
 
-                log::info!("failsafe detected first stage");
+                info!("failsafe detect stage 1");
 
                 // Maybe we are in failsafe, do we receive any more packets in this recovery period?
                 let recovery_deadline = Instant::now().add(FAILSAFE_MONITOR_PERIOD);
@@ -150,7 +153,6 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                     .await
                     .is_err()
                 {
-                    log::info!("failsafe detected second stage");
                     // No command received in the failsafe monitor period, so we enter failsafe again
                     continue 'failsafe_start;
                 }
@@ -380,20 +382,23 @@ impl ArmState {
                 | Command::Rate { throttle, .. }
                 | Command::Angle { throttle, .. } => {
                     if *throttle < 1100 && ArmBlocker::arm().is_ok() {
+                        info!("armed");
                         *self = ArmState::Armed;
                     } else {
+                        info!("arming failed");
                         *self = ArmState::ArmFailed;
                     }
                 }
-                _ => (),
+                Command::Disarmed => (),
             },
             ArmState::Armed | ArmState::ArmFailed => {
                 if let Command::Disarmed = command {
+                    info!("disarmed");
                     *self = ArmState::Disarmed;
                     ArmBlocker::disarm();
                 }
             }
-        };
+        }
     }
 }
 
@@ -421,8 +426,9 @@ impl AngleControl {
 
             cross
                 .try_normalize(1e-6)
-                .map(|cross_normalized| cross_normalized * angle)
-                .unwrap_or(Vector3::zeros())
+                .map_or(Vector3::zeros(), |cross_normalized| {
+                    cross_normalized * angle
+                })
         };
 
         RateControl {
@@ -516,12 +522,13 @@ impl AxisRateController {
     }
 
     fn update(&mut self, target_rate: f32, current_rate: f32, dt: f32) -> f32 {
+        const I_TERM_MAX_ERROR: f32 = 165.0;
+
         let error = target_rate - current_rate;
 
         let ff_term = self.cfg.kff * target_rate;
         let p_term = self.cfg.kp * error;
 
-        const I_TERM_MAX_ERROR: f32 = 165.0;
         if error.abs() <= I_TERM_MAX_ERROR {
             self.i_term += self.cfg.ki * error * dt;
         }

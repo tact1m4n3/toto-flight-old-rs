@@ -9,7 +9,6 @@ use heapless::String;
 use static_cell::StaticCell;
 
 use crate::{
-    control::ArmBlocker,
     imu,
     usb_interface::shell_parser::{CalibrationType, ShellCommand, ShellParser},
 };
@@ -46,35 +45,22 @@ pub async fn task<D: Driver<'static>>(driver: D) {
     let shell_cdc = {
         static STATE: StaticCell<cdc_acm::State> = StaticCell::new();
         let state = STATE.init(cdc_acm::State::new());
-        CdcAcmClass::new(&mut builder, state, MAX_PACKET_SIZE as u16)
-    };
-
-    #[cfg(feature = "usb-log")]
-    let log_cdc = {
-        static STATE: StaticCell<cdc_acm::State> = StaticCell::new();
-        let state = STATE.init(cdc_acm::State::new());
-        CdcAcmClass::new(&mut builder, state, MAX_PACKET_SIZE as u16)
+        CdcAcmClass::new(&mut builder, state, u16::from(MAX_PACKET_SIZE))
     };
 
     let mut usb = builder.build();
 
-    // HACK: join! doesn't support cfg
-    #[cfg(feature = "usb-log")]
-    let log_cdc_run_fut = embassy_usb_logger::with_class!(1024, log::LevelFilter::Info, log_cdc);
-    #[cfg(not(feature = "usb-log"))]
-    let log_cdc_run_fut = core::future::ready(());
-
-    join!(usb.run(), shell_cdc_run(shell_cdc), log_cdc_run_fut);
+    join!(usb.run(), shell_cdc_run(shell_cdc));
 }
 
 async fn shell_cdc_run<D: Driver<'static>>(mut cdc: CdcAcmClass<'static, D>) {
     loop {
         cdc.wait_connection().await;
-        log::info!("usb connected");
+        info!("usb connected");
         // if let Ok(_guard) = ArmBlocker::new() {
         _ = shell(&mut cdc).await;
         // }
-        log::info!("usb disconnected");
+        info!("usb disconnected");
     }
 }
 
@@ -95,10 +81,10 @@ async fn shell<D: Driver<'static>>(cdc: &mut CdcAcmClass<'static, D>) -> Result<
                 Ok(command) => match command {
                     ShellCommand::Calibrate(CalibrationType::ImuEasyCalibration) => {
                         imu::start_calibration();
-                        log::info!("imu calibration started");
+                        info!("imu calibration started");
                     }
                 },
-                Err(err) => _ = write!(response, "error parsing command: {}", err),
+                Err(err) => _ = write!(response, "error parsing command: {err}"),
             }
             _ = write!(response, "\n\r");
 
