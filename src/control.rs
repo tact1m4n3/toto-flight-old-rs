@@ -1,7 +1,4 @@
-use core::{
-    ops::Add,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_futures::select::{Either, select};
 use embassy_sync::signal::Signal;
@@ -15,7 +12,7 @@ use crate::{
     config::{self, Config, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::Motor,
     fusion, imu,
-    utils::{GuardedRefCell, NalgebraVec3Ext},
+    utils::{DurationExt, GuardedRefCell, NalgebraVec3Ext},
 };
 
 const VALID_COMMAND_RATE: Duration = Duration::from_millis(100);
@@ -148,8 +145,7 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                 info!("failsafe detect stage 1");
 
                 // Maybe we are in failsafe, do we receive any more packets in this recovery period?
-                let recovery_deadline = Instant::now().add(FAILSAFE_MONITOR_PERIOD);
-                if embassy_time::with_deadline(recovery_deadline, RC_COMMAND.wait())
+                if embassy_time::with_timeout(FAILSAFE_MONITOR_PERIOD, RC_COMMAND.wait())
                     .await
                     .is_err()
                 {
@@ -161,11 +157,9 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
     }
 
     async fn fast_loop<M: Motor, S: Motor>(&self, mut outputs: Outputs<MOTORS, SERVOS, M, S>) {
-        const FREQ_HZ: u64 = 500;
-        const DT: f32 = 1.0 / FREQ_HZ as f32;
+        const PERIOD: Duration = Duration::from_hz(500);
 
-        let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
-
+        let mut ticker = Ticker::every(PERIOD);
         loop {
             ticker.next().await;
 
@@ -190,7 +184,11 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
 
                             maybe_rate_control.map(|rate_control| {
                                 let gyro = imu::GYRO.get();
-                                rate_control.target_manual(&mut state.rate_controller, &gyro, DT)
+                                rate_control.target_manual(
+                                    &mut state.rate_controller,
+                                    &gyro,
+                                    PERIOD.dt_f32(),
+                                )
                             })
                         }
                     }
@@ -208,15 +206,16 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
     }
 
     async fn slow_loop(&self) {
-        const FREQ_HZ: u64 = 100;
-        // const DT: f32 = 1.0 / FREQ_HZ as f32;
+        const PERIOD: Duration = Duration::from_hz(100);
 
-        let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
-
+        let mut ticker = Ticker::every(PERIOD);
         loop {
             ticker.next().await;
 
             self.state.guarded_mut(|state| {
+                // Arm state transitions
+                state.arm_state.update(&state.command);
+
                 state.slow_loop_target_rate = if state.arm_state.is_armed() {
                     match state.command {
                         Command::Angle {
@@ -256,7 +255,7 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
                 }
             }
 
-            // Mid point calibration
+            // Mid point tuning
             {
                 let mut ticker = Ticker::every(Duration::from_hz(1));
                 loop {
@@ -272,7 +271,10 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
 
                             // this should have no side-effect as the i_term is reset
                             for cfg in state.servo_mixer_config.iter_mut() {
-                                cfg.mid_point_us += i_term.dot(&cfg.mixer_gain) as i16;
+                                cfg.mid_point_us = cfg
+                                    .mid_point_us
+                                    .wrapping_add_signed(i_term.dot(&cfg.mixer_gain) as i16)
+                                    .clamp(cfg.trim_min_us, cfg.trim_max_us);
                             }
                         }
                     });
@@ -292,7 +294,7 @@ impl<const MOTORS: usize, const SERVOS: usize> Control<MOTORS, SERVOS> {
 
             let servo_mixer_config = self.state.guarded_ref(|state| state.servo_mixer_config);
             for (i, cfg) in servo_mixer_config.iter().enumerate() {
-                config::UPDATE_CONFIG
+                config::UPDATE
                     .send(config::ConfigItem::ServoMixerConfig {
                         index: i as u8,
                         config: *cfg,
@@ -483,13 +485,15 @@ impl ManualControl {
 
         ActuatorOutput {
             motors: core::array::from_fn(|i| {
-                let value = throttle as i16 + throw.dot(&motors_cfg[i].mixer_gain) as i16;
-                value.clamp(motors_cfg[i].trim_min_us, motors_cfg[i].trim_max_us) as u16
+                throttle
+                    .wrapping_add_signed(throw.dot(&motors_cfg[i].mixer_gain) as i16)
+                    .clamp(motors_cfg[i].trim_min_us, motors_cfg[i].trim_max_us)
             }),
             servos: core::array::from_fn(|i| {
-                let value =
-                    servos_cfg[i].mid_point_us + throw.dot(&servos_cfg[i].mixer_gain) as i16;
-                value.clamp(servos_cfg[i].trim_min_us, servos_cfg[i].trim_max_us) as u16
+                servos_cfg[i]
+                    .mid_point_us
+                    .wrapping_add_signed(throw.dot(&servos_cfg[i].mixer_gain) as i16)
+                    .clamp(servos_cfg[i].trim_min_us, servos_cfg[i].trim_max_us)
             }),
         }
     }

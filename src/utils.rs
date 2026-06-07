@@ -5,6 +5,7 @@ use core::{
 };
 
 use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
+use embassy_time::Duration;
 use embedded_io_async::BufRead;
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 
@@ -68,6 +69,21 @@ impl NalgebraMatrix3Ext for Matrix3<f32> {
     const IDENTITY: Self = Matrix3::new(1.0, 0.0, 0.0,
                                         0.0, 1.0, 0.0,
                                         0.0, 0.0, 1.0);
+}
+
+pub trait DurationExt {
+    fn dt_f32(&self) -> f32;
+    fn dt_f64(&self) -> f64;
+}
+
+impl DurationExt for Duration {
+    fn dt_f32(&self) -> f32 {
+        self.as_micros() as f32 / 1_000_000.0
+    }
+
+    fn dt_f64(&self) -> f64 {
+        self.as_micros() as f64 / 1_000_000.0
+    }
 }
 
 pub fn pack<const N: usize>(s: &str) -> [u8; N] {

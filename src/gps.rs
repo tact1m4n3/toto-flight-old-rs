@@ -54,7 +54,7 @@ pub async fn task<R: BufRead>(mut reader: R) {
 
         if result.is_err() {
             warn!("failed to read from uart");
-        };
+        }
     }
 }
 

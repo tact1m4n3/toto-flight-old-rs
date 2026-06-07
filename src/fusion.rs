@@ -4,19 +4,18 @@ use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::{
     RawMutex,
-    utils::{NalgebraQuatExt, SyncWatch},
+    utils::{DurationExt, NalgebraQuatExt, SyncWatch},
 };
 
 pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> =
     SyncWatch::new(UnitQuaternion::IDENTITY);
 
 pub async fn task() {
-    const FREQ_HZ: u64 = 100;
-    const DT: f32 = 1.0 / FREQ_HZ as f32;
+    const PERIOD: Duration = Duration::from_hz(100);
 
-    let mut filter = ahrs::Madgwick::new(DT, 0.1);
+    let mut filter = ahrs::Madgwick::new(PERIOD.dt_f32(), 0.1);
 
-    let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
+    let mut ticker = Ticker::every(PERIOD);
     loop {
         ticker.next().await;
 

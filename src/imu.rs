@@ -98,13 +98,13 @@ async fn easy_calibration(cfg: &'static Config) {
 
     let gyro_bias = board_orientation * gyro_mean;
 
-    config::UPDATE_CONFIG
+    config::UPDATE
         .send(config::ConfigItem::ImuCalibration(config::ImuCalibration {
             gyro_bias,
             ..cfg.imu_calibration
         }))
         .await;
-    config::UPDATE_CONFIG
+    config::UPDATE
         .send(config::ConfigItem::BoardOrientation(board_orientation))
         .await;
 }

@@ -112,10 +112,6 @@ assign_resources! {
 }
 
 embassy_rp::bind_interrupts!(pub struct Irqs {
-    USBCTRL_IRQ => usb::InterruptHandler<USB>;
-    I2C0_IRQ => i2c::InterruptHandler<I2C0>;
-    UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
-    UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>,
                  dma::InterruptHandler<DMA_CH1>,
                  dma::InterruptHandler<DMA_CH2>;
@@ -123,11 +119,14 @@ embassy_rp::bind_interrupts!(pub struct Irqs {
                  // dma::InterruptHandler<DMA_CH4>,
                  // dma::InterruptHandler<DMA_CH5>,
                  // dma::InterruptHandler<DMA_CH6>;
+    I2C0_IRQ => i2c::InterruptHandler<I2C0>;
+    UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
+    UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
+    USBCTRL_IRQ => usb::InterruptHandler<USB>;
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
 });
 
 static REALTIME_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
-static HIGH_PRIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 static LOW_PRIO_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
 #[cortex_m_rt::interrupt]
@@ -137,11 +136,6 @@ fn SWI_IRQ_0() {
 
 #[cortex_m_rt::interrupt]
 fn SWI_IRQ_1() {
-    unsafe { HIGH_PRIO_EXECUTOR.on_interrupt() };
-}
-
-#[cortex_m_rt::interrupt]
-fn SWI_IRQ_2() {
     unsafe { LOW_PRIO_EXECUTOR.on_interrupt() };
 }
 
@@ -155,14 +149,14 @@ async fn main(thread_spawner: Spawner) -> ! {
     let r = split_resources!(p);
 
     // init interrupts
-    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P1); // realtime executor
-    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P3); // high prio executor
-    interrupt::SWI_IRQ_2.set_priority(interrupt::Priority::P4); // low prio executor
+    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P0); // realtime executor
+    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P2); // low prio executor
 
-    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P2);
-    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P2);
-    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P0);
-    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P1);
+    interrupt::PIO0_IRQ_0.set_priority(interrupt::Priority::P1);
 
     let outputs = {
         // Make pwm counter increment once every microsecond
@@ -294,26 +288,24 @@ async fn main(thread_spawner: Spawner) -> ! {
     let cfg = CONFIG.init(storage.read().await.unwrap());
 
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
-    let high_prio_spawner = HIGH_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
-    let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_2);
+    let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
 
     info!("setup done. spawning tasks");
 
     realtime_spawner.spawn(imu_interrupt_listener_task(imu_interrupt_pin).unwrap());
     realtime_spawner.spawn(imu_read_task(cfg, imu_sensor).unwrap());
-    realtime_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
     realtime_spawner.spawn(control_task(cfg, outputs).unwrap());
     // This is realtime because it is doing blocking stuff in a critical section anyways
     realtime_spawner.spawn(config_task(storage).unwrap());
 
-    high_prio_spawner.spawn(fusion_task().unwrap());
-    high_prio_spawner.spawn(gps_task(gps_uart_rx).unwrap());
-    high_prio_spawner.spawn(usb_interface_task(usb_driver).unwrap());
-
     low_prio_spawner.spawn(battery_task(battery_sensor).unwrap());
+    low_prio_spawner.spawn(fusion_task().unwrap());
+    low_prio_spawner.spawn(gps_task(gps_uart_rx).unwrap());
     low_prio_spawner.spawn(imu_calibrate_task(cfg).unwrap());
     low_prio_spawner.spawn(led_task(led_driver).unwrap());
+    low_prio_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
     low_prio_spawner.spawn(receiver_telemetry_task(receiver_uart_tx).unwrap());
+    low_prio_spawner.spawn(usb_interface_task(usb_driver).unwrap());
 
     cp.DCB.enable_trace();
 

@@ -19,7 +19,7 @@ use crate::{
 
 const BUFFER_SIZE: usize = 128;
 
-pub static UPDATE_CONFIG: Channel<RawMutex, ConfigItem, 4> = Channel::new();
+pub static UPDATE: Channel<RawMutex, ConfigItem, 4> = Channel::new();
 
 #[derive(Clone)]
 pub enum ConfigItem {
@@ -144,7 +144,7 @@ impl<F: NorFlash> Storage<F> {
 
     pub async fn run(&mut self) {
         loop {
-            let config_item = UPDATE_CONFIG.receive().await;
+            let config_item = UPDATE.receive().await;
             if let Ok(_arm_guard) = ArmBlocker::new() {
                 if self.update_config(config_item).await.is_err() {
                     error!("failed to store config in flash");
@@ -345,16 +345,16 @@ pub struct RateControllerAxisConfig {
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MotorMixerConfig {
-    pub trim_min_us: i16,
-    pub trim_max_us: i16,
+    pub trim_min_us: u16,
+    pub trim_max_us: u16,
     pub throttle_gain: f32,
     pub mixer_gain: Vector3<f32>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ServoMixerConfig {
-    pub mid_point_us: i16,
-    pub trim_min_us: i16,
-    pub trim_max_us: i16,
+    pub mid_point_us: u16,
+    pub trim_min_us: u16,
+    pub trim_max_us: u16,
     pub mixer_gain: Vector3<f32>,
 }

@@ -1,7 +1,6 @@
 #![no_std]
 #![allow(async_fn_in_trait)]
 #![allow(clippy::new_without_default)]
-#![warn(clippy::unused_async)]
 #![recursion_limit = "256"]
 
 pub(crate) type RawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

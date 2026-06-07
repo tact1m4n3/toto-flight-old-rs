@@ -1,17 +1,20 @@
 use embassy_time::{Duration, Ticker};
 
-use crate::{RawMutex, drivers::battery::BatterySensor, utils::SyncWatch};
+use crate::{
+    RawMutex,
+    drivers::battery::BatterySensor,
+    utils::{DurationExt, SyncWatch},
+};
 
 pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data::DEFAULT);
 
-const FREQ_HZ: u64 = 10;
-const DT: f64 = 1.0 / FREQ_HZ as f64;
-
 pub async fn task<B: BatterySensor>(mut sensor: B) {
+    const PERIOD: Duration = Duration::from_hz(10);
+
     let mut prev_current: f64 = 0.0;
     let mut capacity_used: f64 = 0.0;
 
-    let mut ticker = Ticker::every(Duration::from_hz(FREQ_HZ));
+    let mut ticker = Ticker::every(PERIOD);
     loop {
         ticker.next().await;
 
@@ -21,7 +24,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
         };
 
         // trapezoidal integration
-        capacity_used += data.current.midpoint(prev_current) * DT / 3600.0;
+        capacity_used += data.current.midpoint(prev_current) * PERIOD.dt_f64() / 3600.0;
         prev_current = data.current;
 
         DATA.set(Data {

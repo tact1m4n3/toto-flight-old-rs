@@ -139,12 +139,12 @@ impl LinkStats {
     };
 }
 
-const TELEMETRY_FREQ_HZ: u64 = 10;
-
 pub async fn task_telemetry<W: Write>(mut writer: W) {
+    const PERIOD: Duration = Duration::from_hz(10);
+
     let mut battery_info_watcher = super::battery::DATA.watcher();
 
-    let mut ticker = Ticker::every(Duration::from_hz(TELEMETRY_FREQ_HZ));
+    let mut ticker = Ticker::every(PERIOD);
     loop {
         ticker.next().await;
 
