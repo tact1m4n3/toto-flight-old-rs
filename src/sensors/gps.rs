@@ -1,24 +1,7 @@
 use embedded_io_async::BufRead;
 use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRef};
 
-use crate::{
-    RawMutex,
-    utils::{SyncWatch, read_process_and_consume},
-};
-
-pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
-    latitude: 0.0,
-    longitude: 0.0,
-    altitude: 0.0,
-    h_acc: f32::INFINITY,
-    v_acc: f32::INFINITY,
-    speed: 0.0,
-    heading: 0.0,
-    num_sat: 0,
-    hdop: f32::INFINITY,
-    fix_type: FixType::Undefined,
-    vertical_velocity: 0.0,
-});
+use crate::utils::read_process_and_consume;
 
 pub async fn task<R: BufRead>(mut reader: R) {
     let mut parser: ublox::Parser<FixedBuffer<128>> = Parser::new_fixed();
@@ -43,7 +26,8 @@ pub async fn task<R: BufRead>(mut reader: R) {
                             fix_type: pvt.fix_type().into(),
                             vertical_velocity: pvt.vel_down() as f32,
                         };
-                        DATA.set(data);
+
+                        super::DATA.lock(|state| state.borrow_mut().gps = data);
                     }
                 } else {
                     warn!("failed to parse ublox packet");

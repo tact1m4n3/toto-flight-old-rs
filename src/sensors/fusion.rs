@@ -1,14 +1,8 @@
 use ahrs::Ahrs;
 use embassy_time::{Duration, Ticker};
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 
-use crate::{
-    RawMutex,
-    utils::{DurationExt, NalgebraQuatExt, SyncWatch},
-};
-
-pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> =
-    SyncWatch::new(UnitQuaternion::IDENTITY);
+use crate::utils::DurationExt;
 
 pub async fn task() {
     const PERIOD: Duration = Duration::from_hz(100);
@@ -19,8 +13,10 @@ pub async fn task() {
     loop {
         ticker.next().await;
 
-        let gyro = super::imu::GYRO.get();
-        let accel = super::imu::ACCEL.get();
+        let (gyro, accel) = super::DATA.lock(|state| {
+            let state = state.borrow();
+            (state.gyro, state.accel)
+        });
         let gyro_nwu = Vector3::new(gyro.x, -gyro.y, -gyro.z);
         let accel_nwu = Vector3::new(accel.x, -accel.y, -accel.z);
 
@@ -30,6 +26,8 @@ pub async fn task() {
             Err(_) => filter.update_gyro(&gyro_nwu),
         };
 
-        ATTITUDE.set(*quat);
+        super::DATA.lock(|state| {
+            state.borrow_mut().attitude = *quat;
+        });
     }
 }

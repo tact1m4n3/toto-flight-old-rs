@@ -11,15 +11,13 @@ pub const MAX_SERVO_OUTPUTS: usize = 5;
 #[macro_use]
 pub mod log;
 
-pub mod battery;
 pub mod config;
 pub mod control;
 #[cfg(feature = "cpu-usage")]
 pub mod cpu_usage;
 pub mod drivers;
-pub mod fusion;
-pub mod gps;
-pub mod imu;
 pub mod receiver;
+pub mod sensors;
+pub mod status_led;
 pub mod usb_interface;
 pub mod utils;

@@ -9,7 +9,7 @@ use heapless::String;
 use static_cell::StaticCell;
 
 use crate::{
-    imu,
+    sensors,
     usb_interface::shell_parser::{CalibrationType, ShellCommand, ShellParser},
 };
 
@@ -80,8 +80,8 @@ async fn shell<D: Driver<'static>>(cdc: &mut CdcAcmClass<'static, D>) -> Result<
             match result {
                 Ok(command) => match command {
                     ShellCommand::Calibrate(CalibrationType::ImuEasyCalibration) => {
-                        imu::start_calibration();
-                        info!("imu calibration started");
+                        sensors::imu::start_calibration();
+                        _ = write!(response, "imu calibration started")
                     }
                 },
                 Err(err) => _ = write!(response, "error parsing command: {err}"),

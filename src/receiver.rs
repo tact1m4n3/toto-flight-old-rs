@@ -1,19 +1,57 @@
-use core::ops::RangeInclusive;
+use core::{cell::RefCell, ops::RangeInclusive};
 
 use crsf::PayloadDump;
+use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
 
 use crate::{
-    RawMutex, control,
-    utils::{SyncWatch, US_TO_NEG_ONE_ONE, read_process_and_consume},
+    RawMutex,
+    control::{self, Command},
+    sensors,
+    utils::{US_TO_NEG_ONE_ONE, read_process_and_consume},
 };
 
-pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new([1_500; 16]);
-pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats::DEFAULT);
+pub static STATE: Mutex<RawMutex, RefCell<State>> = Mutex::new(RefCell::new(State {
+    channels: [1500; 16],
+    link_stats: LinkStats {
+        link_quality_uplink: 0,
+        link_quality_downlink: 0,
+        rssi_uplink: 255,
+        rssi_downlink: 255,
+    },
+    command: Command::Disarmed,
+}));
+static CHANNELS_RECEIVED: Signal<RawMutex, ()> = Signal::new();
 
-pub async fn task_read<R: BufRead>(mut reader: R) {
+pub struct State {
+    channels: [u16; 16],
+    link_stats: LinkStats,
+    command: Command,
+}
+
+impl State {
+    pub fn channels(&self) -> &[u16; 16] {
+        &self.channels
+    }
+    pub fn link_stats(&self) -> &LinkStats {
+        &self.link_stats
+    }
+    pub fn command(&self) -> &Command {
+        &self.command
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LinkStats {
+    pub link_quality_uplink: u8,
+    pub link_quality_downlink: u8,
+    pub rssi_uplink: u8,
+    pub rssi_downlink: u8,
+}
+
+pub async fn task_channels_manager() {
     let mut arm_switch = ChannelCondition {
         channel_idx: 4,
         range: 1700..=2000,
@@ -37,6 +75,52 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
         state: false,
     };
 
+    loop {
+        CHANNELS_RECEIVED.wait().await;
+        let channels = STATE.lock(|state| state.borrow().channels);
+
+        arm_switch.update(&channels);
+
+        let flight_mode = flight_mode_manager.update(&channels);
+
+        if let Some(auto_tune) = auto_tune_switch.update(&channels) {
+            control::AUTO_TUNE.signal(auto_tune);
+        }
+
+        let command = if arm_switch.state {
+            match flight_mode {
+                FlightMode::Manual => Command::Manual {
+                    throttle: channels[2],
+                    throw: Vector3::new(
+                        channels[0] as f32 - 1500.0,
+                        channels[1] as f32 - 1500.0,
+                        channels[3] as f32 - 1500.0,
+                    ),
+                },
+                FlightMode::Rate => Command::Rate {
+                    throttle: channels[2],
+                    rate: Vector3::new(
+                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels[3] as f32) * 45.0,
+                    ),
+                },
+                FlightMode::Angle => Command::Angle {
+                    throttle: channels[2],
+                    roll_angle: US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
+                    pitch_angle: US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
+                },
+            }
+        } else {
+            Command::Disarmed
+        };
+
+        STATE.lock(|state| state.borrow_mut().command = command);
+        control::HEARTBEAT_RECEIVER_COMMAND.signal(());
+    }
+}
+
+pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
     let mut parser = crsf::Parser::new(crsf::ParserConfig::default());
 
     loop {
@@ -55,59 +139,21 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
                     crsf::Packet::RcChannelsPacked(raw_channels) => {
                         let channels: [u16; 16] =
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
-
-                        arm_switch.update(&channels);
-
-                        let flight_mode = flight_mode_manager.update(&channels);
-
-                        if let Some(auto_tune) = auto_tune_switch.update(&channels) {
-                            control::AUTO_TUNE.signal(auto_tune);
-                        }
-
-                        let command = if arm_switch.state {
-                            match flight_mode {
-                                FlightMode::Manual => control::Command::Manual {
-                                    throttle: channels[2],
-                                    throw: Vector3::new(
-                                        channels[0] as f32 - 1500.0,
-                                        channels[1] as f32 - 1500.0,
-                                        channels[3] as f32 - 1500.0,
-                                    ),
-                                },
-                                FlightMode::Rate => control::Command::Rate {
-                                    throttle: channels[2],
-                                    rate: Vector3::new(
-                                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
-                                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
-                                        US_TO_NEG_ONE_ONE.map(channels[3] as f32) * 45.0,
-                                    ),
-                                },
-                                FlightMode::Angle => control::Command::Angle {
-                                    throttle: channels[2],
-                                    roll_angle: US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
-                                    pitch_angle: US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
-                                },
-                            }
-                        } else {
-                            control::Command::Disarmed
-                        };
-
-                        CHANNELS.set(channels);
-
-                        control::RC_COMMAND.signal(command);
+                        STATE.lock(|state| state.borrow_mut().channels = channels);
+                        CHANNELS_RECEIVED.signal(());
                     }
                     crsf::Packet::LinkStatistics(ls) => {
                         let link_stats = LinkStats {
-                            uplink_link_quality: ls.uplink_link_quality,
-                            uplink_rssi: if ls.active_antenna == 1 {
+                            link_quality_uplink: ls.uplink_link_quality,
+                            link_quality_downlink: ls.downlink_link_quality,
+                            rssi_uplink: if ls.active_antenna == 1 {
                                 ls.uplink_rssi_1
                             } else {
                                 ls.uplink_rssi_2
                             },
-                            downlink_link_quality: ls.downlink_link_quality,
-                            downlink_rssi: ls.downlink_rssi,
+                            rssi_downlink: ls.downlink_rssi,
                         };
-                        LINK_STATS.set(link_stats);
+                        STATE.lock(|state| state.borrow_mut().link_stats = link_stats);
                     }
                     _ => {}
                 }
@@ -122,27 +168,8 @@ pub async fn task_read<R: BufRead>(mut reader: R) {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct LinkStats {
-    pub uplink_link_quality: u8,
-    pub uplink_rssi: u8,
-    pub downlink_link_quality: u8,
-    pub downlink_rssi: u8,
-}
-
-impl LinkStats {
-    pub const DEFAULT: LinkStats = LinkStats {
-        uplink_link_quality: 0,
-        uplink_rssi: 255,
-        downlink_link_quality: 0,
-        downlink_rssi: 255,
-    };
-}
-
 pub async fn task_telemetry<W: Write>(mut writer: W) {
     const PERIOD: Duration = Duration::from_hz(10);
-
-    let mut battery_info_watcher = super::battery::DATA.watcher();
 
     let mut ticker = Ticker::every(PERIOD);
     loop {
@@ -150,7 +177,9 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
 
         let mut buf: [u8; crsf::MAX_PACKET_LEN] = [0; crsf::MAX_PACKET_LEN];
 
-        if let Some(battery) = battery_info_watcher.get_if_changed() {
+        {
+            let battery = sensors::DATA.lock(|state| state.borrow().battery);
+
             let packet = crsf::BatterySensor {
                 voltage: (battery.voltage * 10.0) as i16,    // already in mV
                 current: (battery.current / 10.0) as i16,    // already in mA

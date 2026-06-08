@@ -74,6 +74,8 @@ sequential-storage = { version = "7.2.0", default-features = false, features = [
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 postcard = "1.1.3"
 
+smart-leds = "0.4.0"
+
 [patch.crates-io]
 embedded-sdmmc = { git = "https://github.com/tact1m4n3/embedded-sdmmc-rs", branch = "max_file_size_error" }
 

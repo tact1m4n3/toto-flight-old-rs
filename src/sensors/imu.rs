@@ -2,15 +2,11 @@ use embassy_sync::signal::Signal;
 use nalgebra::{Matrix3, Rotation3, Vector3};
 
 use crate::{
-    RawMutex,
-    config::{self, Config},
+    RawMutex, config,
     control::ArmBlocker,
     drivers::imu::{Data, ImuSensor},
-    utils::{NalgebraVec3Ext, SyncWatch},
+    utils::NalgebraVec3Ext,
 };
-
-pub static GYRO: SyncWatch<RawMutex, Vector3<f32>> = SyncWatch::new(Vector3::ZEROS);
-pub static ACCEL: SyncWatch<RawMutex, Vector3<f32>> = SyncWatch::new(Vector3::ZEROS);
 
 static TAKE_SAMPLE_SIGNAL: Signal<RawMutex, ()> = Signal::new();
 
@@ -28,7 +24,9 @@ pub async fn task_interrupt_listener<P: embedded_hal_async::digital::Wait>(mut i
     }
 }
 
-pub async fn task_read<I: ImuSensor>(cfg: &'static Config, mut imu: I) {
+pub async fn task_read<I: ImuSensor>(mut imu: I) {
+    let cfg = config::INITIAL.get().await;
+
     loop {
         TAKE_SAMPLE_SIGNAL.wait().await;
 
@@ -47,16 +45,19 @@ pub async fn task_read<I: ImuSensor>(cfg: &'static Config, mut imu: I) {
         gyro *= core::f32::consts::PI / 180.0; // to rad/s from dps
         accel *= 9.80665; // to m/s^2 from g
 
-        GYRO.set(gyro);
-        ACCEL.set(accel);
+        super::DATA.lock(|state| {
+            let mut state = state.borrow_mut();
+            state.gyro = gyro;
+            state.accel = accel;
+        });
     }
 }
 
-pub async fn task_calibrate(cfg: &'static Config) {
+pub async fn task_calibrate() {
     loop {
         CALIBRATE.wait().await;
         if let Ok(_guard) = ArmBlocker::new() {
-            easy_calibration(cfg).await;
+            easy_calibration().await;
         } else {
             warn!("ignoring imu calibration request because drone is armed");
         }
@@ -64,8 +65,10 @@ pub async fn task_calibrate(cfg: &'static Config) {
 }
 
 // TODO: move orientation calibration someplace else and add accelerometer calibration
-async fn easy_calibration(cfg: &'static Config) {
+async fn easy_calibration() {
     const SAMPLE_COUNT: usize = 1000;
+
+    let cfg = config::INITIAL.get().await;
 
     let mut gyro_accum = Vector3::ZEROS;
     let mut accel_accum = Vector3::ZEROS;
@@ -98,13 +101,15 @@ async fn easy_calibration(cfg: &'static Config) {
 
     let gyro_bias = board_orientation * gyro_mean;
 
-    config::UPDATE
-        .send(config::ConfigItem::ImuCalibration(config::ImuCalibration {
-            gyro_bias,
-            ..cfg.imu_calibration
-        }))
-        .await;
-    config::UPDATE
-        .send(config::ConfigItem::BoardOrientation(board_orientation))
-        .await;
+    config::UpdateItem::ImuCalibration(config::ImuCalibration {
+        gyro_bias,
+        ..cfg.imu_calibration
+    })
+    .commit()
+    .await
+    .ok();
+    config::UpdateItem::BoardOrientation(board_orientation)
+        .commit()
+        .await
+        .ok();
 }

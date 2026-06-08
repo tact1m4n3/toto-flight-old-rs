@@ -13,7 +13,6 @@ use embassy_rp::{
     pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
-use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use fixed::FixedU16;
 use static_cell::StaticCell;
@@ -25,10 +24,7 @@ use panic_probe as _;
 #[macro_use]
 extern crate toto_flight;
 
-use toto_flight::{
-    config::Config,
-    drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b},
-};
+use toto_flight::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b};
 
 type Outputs =
     toto_flight::control::Outputs<1, 2, pwm::PwmOutput<'static>, pwm::PwmOutput<'static>>;
@@ -52,7 +48,6 @@ const FLASH_STORAGE_RANGE: Range<u32> = FLASH_SIZE - 4 * 0x1000..FLASH_SIZE; // 
 type Flash = flash::Flash<'static, FLASH, flash::Blocking, { FLASH_SIZE as usize }>;
 type AsyncFlash =
     BlockingAsync<flash::Flash<'static, FLASH, flash::Blocking, { FLASH_SIZE as usize }>>;
-type Storage = toto_flight::config::Storage<AsyncFlash>;
 
 type UsbDriver = usb::Driver<'static, USB>;
 
@@ -269,7 +264,6 @@ async fn main(thread_spawner: Spawner) -> ! {
     let battery_sensor = BatterySensor::new(i2c_device.clone()).await.unwrap();
 
     let flash = BlockingAsync::new(Flash::new_blocking(r.flash.flash));
-    let mut storage = toto_flight::config::Storage::new(flash, FLASH_STORAGE_RANGE);
 
     let usb_driver = usb::Driver::new(r.usb.usb, Irqs);
 
@@ -284,28 +278,27 @@ async fn main(thread_spawner: Spawner) -> ! {
         &program,
     );
 
-    static CONFIG: StaticCell<Config> = StaticCell::new();
-    let cfg = CONFIG.init(storage.read().await.unwrap());
-
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
     let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
 
     info!("setup done. spawning tasks");
 
-    realtime_spawner.spawn(imu_interrupt_listener_task(imu_interrupt_pin).unwrap());
-    realtime_spawner.spawn(imu_read_task(cfg, imu_sensor).unwrap());
-    realtime_spawner.spawn(control_task(cfg, outputs).unwrap());
     // This is realtime because it is doing blocking stuff in a critical section anyways
-    realtime_spawner.spawn(config_task(storage).unwrap());
+    realtime_spawner.spawn(task_config(flash, FLASH_STORAGE_RANGE).unwrap());
 
-    low_prio_spawner.spawn(battery_task(battery_sensor).unwrap());
-    low_prio_spawner.spawn(fusion_task().unwrap());
-    low_prio_spawner.spawn(gps_task(gps_uart_rx).unwrap());
-    low_prio_spawner.spawn(imu_calibrate_task(cfg).unwrap());
-    low_prio_spawner.spawn(led_task(led_driver).unwrap());
-    low_prio_spawner.spawn(receiver_read_task(receiver_uart_rx).unwrap());
-    low_prio_spawner.spawn(receiver_telemetry_task(receiver_uart_tx).unwrap());
-    low_prio_spawner.spawn(usb_interface_task(usb_driver).unwrap());
+    realtime_spawner.spawn(task_imu_interrupt_listener(imu_interrupt_pin).unwrap());
+    realtime_spawner.spawn(task_imu_read(imu_sensor).unwrap());
+    realtime_spawner.spawn(task_rate_controller(outputs).unwrap());
+
+    low_prio_spawner.spawn(task_battery(battery_sensor).unwrap());
+    low_prio_spawner.spawn(task_gps(gps_uart_rx).unwrap());
+    low_prio_spawner.spawn(task_sensor_fusion().unwrap());
+    low_prio_spawner.spawn(task_imu_calibrate().unwrap());
+    low_prio_spawner.spawn(task_receiver_channels_manager().unwrap());
+    low_prio_spawner.spawn(task_receiver_read_crsf(receiver_uart_rx).unwrap());
+    low_prio_spawner.spawn(task_receiver_telemetry_crsf(receiver_uart_tx).unwrap());
+    low_prio_spawner.spawn(task_status_led(led_driver).unwrap());
+    low_prio_spawner.spawn(task_usb_interface(usb_driver).unwrap());
 
     cp.DCB.enable_trace();
 
@@ -329,70 +322,78 @@ async fn main(thread_spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn led_task(mut led_driver: PioWs2812Driver) {
-    // TODO: Different patterns to show state
-    loop {
-        led_driver.write_slice(&[(0, 0, 100).into()]).await;
-        Timer::after(Duration::from_millis(500)).await;
-        led_driver.write_slice(&[(0, 0, 0).into()]).await;
-        Timer::after(Duration::from_millis(500)).await;
-    }
+async fn task_config(flash: AsyncFlash, range: Range<u32>) {
+    toto_flight::config::task(flash, range).await;
 }
 
 #[embassy_executor::task]
-async fn battery_task(battery_sensor: BatterySensor) {
-    toto_flight::battery::task(battery_sensor).await;
+async fn task_command_guardian() {
+    toto_flight::control::task_command_guardian().await;
 }
 
 #[embassy_executor::task]
-async fn control_task(cfg: &'static Config, outputs: Outputs) {
-    let control = toto_flight::control::Control::new(cfg);
-    control.run(outputs).await;
+async fn task_rate_controller(outputs: Outputs) {
+    toto_flight::control::task_inner_loop(outputs).await;
 }
 
 #[embassy_executor::task]
-async fn config_task(mut storage: Storage) {
-    storage.run().await;
+async fn task_navigator() {
+    toto_flight::control::task_outer_loop().await;
 }
 
 #[embassy_executor::task]
-async fn fusion_task() {
-    toto_flight::fusion::task().await;
+async fn task_battery(battery_sensor: BatterySensor) {
+    toto_flight::sensors::battery::task(battery_sensor).await;
 }
 
 #[embassy_executor::task]
-async fn gps_task(uart_rx: uart::BufferedUartRx) {
-    toto_flight::gps::task(uart_rx).await;
+async fn task_gps(uart_rx: uart::BufferedUartRx) {
+    toto_flight::sensors::gps::task(uart_rx).await;
 }
 
 #[embassy_executor::task]
-async fn imu_interrupt_listener_task(pin: ImuInterruptPin) {
-    toto_flight::imu::task_interrupt_listener(pin).await;
+async fn task_imu_interrupt_listener(pin: ImuInterruptPin) {
+    toto_flight::sensors::imu::task_interrupt_listener(pin).await;
 }
 
 #[embassy_executor::task]
-async fn imu_read_task(cfg: &'static Config, imu: ImuSensor) {
-    toto_flight::imu::task_read(cfg, imu).await;
+async fn task_imu_read(imu: ImuSensor) {
+    toto_flight::sensors::imu::task_read(imu).await;
 }
 
 #[embassy_executor::task]
-async fn imu_calibrate_task(cfg: &'static Config) {
-    toto_flight::imu::task_calibrate(cfg).await;
+async fn task_imu_calibrate() {
+    toto_flight::sensors::imu::task_calibrate().await;
 }
 
 #[embassy_executor::task]
-async fn receiver_read_task(uart_rx: uart::BufferedUartRx) {
-    toto_flight::receiver::task_read(uart_rx).await;
+async fn task_sensor_fusion() {
+    toto_flight::sensors::fusion::task().await;
 }
 
 #[embassy_executor::task]
-async fn receiver_telemetry_task(uart_tx: uart::BufferedUartTx) {
+async fn task_receiver_read_crsf(uart_rx: uart::BufferedUartRx) {
+    toto_flight::receiver::task_read_crsf(uart_rx).await;
+}
+
+#[embassy_executor::task]
+async fn task_receiver_channels_manager() {
+    toto_flight::receiver::task_channels_manager().await;
+}
+
+#[embassy_executor::task]
+async fn task_receiver_telemetry_crsf(uart_tx: uart::BufferedUartTx) {
     toto_flight::receiver::task_telemetry(uart_tx).await;
 }
 
 #[embassy_executor::task]
-async fn usb_interface_task(usb_driver: UsbDriver) {
+async fn task_usb_interface(usb_driver: UsbDriver) {
     toto_flight::usb_interface::task(usb_driver).await;
+}
+
+#[embassy_executor::task]
+async fn task_status_led(led_driver: PioWs2812Driver) {
+    toto_flight::status_led::task(led_driver).await;
 }
 
 #[cfg(feature = "defmt")]

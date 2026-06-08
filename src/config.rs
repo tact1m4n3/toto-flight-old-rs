@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use embassy_sync::channel::Channel;
+use embassy_sync::{channel::Channel, once_lock::OnceLock, signal::Signal};
 use embedded_storage_async::nor_flash::NorFlash;
 use heapless::String;
 use nalgebra::{Matrix3, Vector3};
@@ -19,10 +19,19 @@ use crate::{
 
 const BUFFER_SIZE: usize = 128;
 
-pub static UPDATE: Channel<RawMutex, ConfigItem, 4> = Channel::new();
+pub static INITIAL: OnceLock<Config> = OnceLock::new();
+
+static UPDATE: Channel<RawMutex, UpdateItem, 1> = Channel::new();
+static UPDATE_ACK: Signal<RawMutex, bool> = Signal::new();
+
+#[derive(Debug)]
+pub enum UpdateError {
+    CraftArmed,
+    OtherError,
+}
 
 #[derive(Clone)]
-pub enum ConfigItem {
+pub enum UpdateItem {
     CraftName(String<16>),
     BoardForwardAngle(f32),
     ImuCalibration(ImuCalibration),
@@ -30,6 +39,23 @@ pub enum ConfigItem {
     RateControllerConfig(RateControllerConfig),
     MotorMixerConfig { index: u8, config: MotorMixerConfig },
     ServoMixerConfig { index: u8, config: ServoMixerConfig },
+}
+
+impl UpdateItem {
+    pub async fn commit(self) -> Result<(), UpdateError> {
+        if let Ok(_arm_guard) = ArmBlocker::new() {
+            UPDATE.send(self).await;
+            if UPDATE_ACK.wait().await {
+                Ok(())
+            } else {
+                warn!("unexpected error occured while updating config");
+                Err(UpdateError::OtherError)
+            }
+        } else {
+            warn!("can't update config while the craft is armed");
+            Err(UpdateError::CraftArmed)
+        }
+    }
 }
 
 pub struct Config {
@@ -119,84 +145,124 @@ impl Default for Config {
     }
 }
 
-pub struct Storage<F: NorFlash> {
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImuCalibration {
+    pub gyro_bias: Vector3<f32>,
+    pub accel_bias: Vector3<f32>,
+    pub accel_scale: Vector3<f32>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RateControllerConfig {
+    pub roll: RateControllerAxisConfig,
+    pub pitch: RateControllerAxisConfig,
+    pub yaw: RateControllerAxisConfig,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RateControllerAxisConfig {
+    pub kp: f32,
+    pub ki: f32,
+    pub kff: f32,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct MotorMixerConfig {
+    pub trim_min_us: u16,
+    pub trim_max_us: u16,
+    pub throttle_gain: f32,
+    pub mixer_gain: Vector3<f32>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ServoMixerConfig {
+    pub mid_point_us: u16,
+    pub trim_min_us: u16,
+    pub trim_max_us: u16,
+    pub mixer_gain: Vector3<f32>,
+}
+
+/// Must run in the highest priority task. Tasks of higher priority waiting on
+/// the initial config deadlock otherwise.
+pub async fn task<F: NorFlash>(flash: F, range: Range<u32>) {
+    let mut storage = Storage::new(flash, range);
+    let config = storage.read().await.unwrap();
+    INITIAL.init(config).ok(); // This shouldn't happen, but if it does whatever
+
+    loop {
+        let config_item = UPDATE.receive().await;
+        UPDATE_ACK.signal(storage.update_config(config_item).await.is_ok());
+    }
+}
+
+struct Storage<F: NorFlash> {
     inner: MapStorage<StorageKey, F, NoCache>,
 }
 
 impl<F: NorFlash> Storage<F> {
-    pub fn new(flash: F, range: Range<u32>) -> Storage<F> {
+    fn new(flash: F, range: Range<u32>) -> Storage<F> {
         Self {
             inner: MapStorage::new(flash, MapConfig::new(range), NoCache),
         }
     }
 
-    pub async fn read(&mut self) -> Result<Config, Error<F::Error>> {
+    async fn read(&mut self) -> Result<Config, Error<F::Error>> {
         match self.read_inner().await {
             Ok(config) => Ok(config),
-            Err(Error::Corrupted {}) => {
-                warn!("config in flash is corrupted. erasing all config");
-                self.inner.erase_all().await.ok();
+            Err(err) => {
+                if let Error::Corrupted {} = err {
+                    warn!("config in flash is corrupted. erasing all config");
+                    self.inner.erase_all().await.ok();
+                } else {
+                    warn!("unexpected error while reading config");
+                }
                 Ok(Config::default())
             }
-            Err(err) => Err(err),
         }
     }
 
-    pub async fn run(&mut self) {
-        loop {
-            let config_item = UPDATE.receive().await;
-            if let Ok(_arm_guard) = ArmBlocker::new() {
-                if self.update_config(config_item).await.is_err() {
-                    error!("failed to store config in flash");
-                }
-            } else {
-                warn!("config update dropped because craft is armed");
-            }
-        }
-    }
-
-    async fn update_config(&mut self, config_item: ConfigItem) -> Result<(), Error<F::Error>> {
+    async fn update_config(&mut self, config_item: UpdateItem) -> Result<(), Error<F::Error>> {
         match config_item {
-            ConfigItem::CraftName(name) => {
+            UpdateItem::CraftName(name) => {
                 self.raw_write(&StorageKey::CraftName, &StorageValue::CraftName(name))
                     .await?;
             }
-            ConfigItem::BoardForwardAngle(angle) => {
+            UpdateItem::BoardForwardAngle(angle) => {
                 self.raw_write(
                     &StorageKey::BoardForwardAngle,
                     &StorageValue::BoardForwardAngle(angle),
                 )
                 .await?;
             }
-            ConfigItem::ImuCalibration(calib) => {
+            UpdateItem::ImuCalibration(calib) => {
                 self.raw_write(
                     &StorageKey::ImuCalibration,
                     &StorageValue::ImuCalibration(calib),
                 )
                 .await?;
             }
-            ConfigItem::BoardOrientation(orientation) => {
+            UpdateItem::BoardOrientation(orientation) => {
                 self.raw_write(
                     &StorageKey::BoardOrientation,
                     &StorageValue::BoardOrientation(orientation),
                 )
                 .await?;
             }
-            ConfigItem::RateControllerConfig(rcc) => {
+            UpdateItem::RateControllerConfig(rcc) => {
                 self.raw_write(
                     &StorageKey::RateControllerConfig,
                     &StorageValue::RateControllerConfig(rcc),
                 )
                 .await?;
             }
-            ConfigItem::MotorMixerConfig { index, config } => {
+            UpdateItem::MotorMixerConfig { index, config } => {
                 self.raw_write(
                     &StorageKey::MotorConfig { index },
                     &StorageValue::MotorConfig(config),
                 )
                 .await?;
             }
-            ConfigItem::ServoMixerConfig { index, config } => {
+            UpdateItem::ServoMixerConfig { index, config } => {
                 self.raw_write(
                     &StorageKey::ServoConfig { index },
                     &StorageValue::ServoConfig(config),
@@ -281,7 +347,7 @@ impl<F: NorFlash> Storage<F> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum StorageKey {
+enum StorageKey {
     CraftName,
     BoardForwardAngle,
     ImuCalibration,
@@ -310,7 +376,7 @@ impl Key for StorageKey {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-pub enum StorageValue {
+enum StorageValue {
     CraftName(String<16>),
     BoardForwardAngle(f32),
     ImuCalibration(ImuCalibration),
@@ -321,40 +387,3 @@ pub enum StorageValue {
 }
 
 impl PostcardValue<'_> for StorageValue {}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ImuCalibration {
-    pub gyro_bias: Vector3<f32>,
-    pub accel_bias: Vector3<f32>,
-    pub accel_scale: Vector3<f32>,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RateControllerConfig {
-    pub roll: RateControllerAxisConfig,
-    pub pitch: RateControllerAxisConfig,
-    pub yaw: RateControllerAxisConfig,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RateControllerAxisConfig {
-    pub kp: f32,
-    pub ki: f32,
-    pub kff: f32,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct MotorMixerConfig {
-    pub trim_min_us: u16,
-    pub trim_max_us: u16,
-    pub throttle_gain: f32,
-    pub mixer_gain: Vector3<f32>,
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub struct ServoMixerConfig {
-    pub mid_point_us: u16,
-    pub trim_min_us: u16,
-    pub trim_max_us: u16,
-    pub mixer_gain: Vector3<f32>,
-}
