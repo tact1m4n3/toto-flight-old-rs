@@ -288,7 +288,7 @@ async fn main(thread_spawner: Spawner) -> ! {
 
     realtime_spawner.spawn(task_imu_interrupt_listener(imu_interrupt_pin).unwrap());
     realtime_spawner.spawn(task_imu_read(imu_sensor).unwrap());
-    realtime_spawner.spawn(task_rate_controller(outputs).unwrap());
+    realtime_spawner.spawn(task_control_inner_loop(outputs).unwrap());
 
     low_prio_spawner.spawn(task_battery(battery_sensor).unwrap());
     low_prio_spawner.spawn(task_gps(gps_uart_rx).unwrap());
@@ -332,12 +332,12 @@ async fn task_command_guardian() {
 }
 
 #[embassy_executor::task]
-async fn task_rate_controller(outputs: Outputs) {
+async fn task_control_inner_loop(outputs: Outputs) {
     toto_flight::control::task_inner_loop(outputs).await;
 }
 
 #[embassy_executor::task]
-async fn task_navigator() {
+async fn task_control_outer_loop() {
     toto_flight::control::task_outer_loop().await;
 }
 
