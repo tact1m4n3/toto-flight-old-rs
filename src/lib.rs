@@ -11,6 +11,7 @@ pub const MAX_SERVO_OUTPUTS: usize = 5;
 #[macro_use]
 pub mod log;
 
+pub mod black_box;
 pub mod config;
 pub mod control;
 #[cfg(feature = "cpu-usage")]

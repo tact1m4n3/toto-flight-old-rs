@@ -7,7 +7,16 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    pub fn new() -> Self {
+    pub fn new(cp: &mut cortex_m::Peripherals) -> Self {
+        cp.DCB.enable_trace();
+
+        cp.DWT.set_cycle_count(0);
+        cp.DWT.set_exception_count(0);
+        cp.DWT.enable_cycle_counter();
+
+        // set SEVONPEND flag so that interrupts set the event flag even inside a critical section
+        unsafe { cp.SCB.scr.modify(|reg| reg | 0x10) }
+
         Self {
             last_tick_ticks: 0,
             idle_ticks: 0,

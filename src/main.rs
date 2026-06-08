@@ -13,7 +13,9 @@ use embassy_rp::{
     pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
+use embassy_time::Delay;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_sdmmc::sdcard::spi::AcquireOpts;
 use fixed::FixedU16;
 use static_cell::StaticCell;
 
@@ -138,7 +140,7 @@ fn SWI_IRQ_1() {
 async fn main(thread_spawner: Spawner) -> ! {
     _ = thread_spawner;
 
-    let mut cp = cortex_m::Peripherals::take().unwrap();
+    let mut _cp = cortex_m::Peripherals::take().unwrap();
 
     let p = embassy_rp::init(embassy_rp::config::Config::default());
     let r = split_resources!(p);
@@ -261,6 +263,21 @@ async fn main(thread_spawner: Spawner) -> ! {
 
         SharedI2cDevice::new(I2C_BUS.init(AsyncMutex::new(i2c_bus)))
     };
+
+    let sd_card_spi_device = {
+        let mut config = spi::Config::default();
+        config.frequency = 100_000;
+        let spi = spi::Spi::new_blocking(
+            r.sd_card.spi,
+            r.sd_card.clk_pin,
+            r.sd_card.mosi_pin,
+            r.sd_card.miso_pin,
+            config,
+        );
+        let spi_cs = gpio::Output::new(r.sd_card.cs_pin, gpio::Level::High);
+        ExclusiveDevice::new_no_delay(spi, spi_cs).unwrap() // NOTE: can't fail
+    };
+
     let battery_sensor = BatterySensor::new(i2c_device.clone()).await.unwrap();
 
     let flash = BlockingAsync::new(Flash::new_blocking(r.flash.flash));
@@ -300,21 +317,40 @@ async fn main(thread_spawner: Spawner) -> ! {
     low_prio_spawner.spawn(task_status_led(led_driver).unwrap());
     low_prio_spawner.spawn(task_usb_interface(usb_driver).unwrap());
 
-    cp.DCB.enable_trace();
+    let mut maybe_black_box = {
+        let sd_card = embedded_sdmmc::SdCard::new_with_options(
+            sd_card_spi_device,
+            Delay,
+            AcquireOpts {
+                use_crc: true,
+                acquire_retries: 1,
+            },
+        );
 
-    cp.DWT.set_cycle_count(0);
-    cp.DWT.set_exception_count(0);
-    cp.DWT.enable_cycle_counter();
+        // this also initializes the sdcard
+        if let Ok(_sd_card_size) = sd_card.num_bytes() {
+            info!("sd card size: {}MB", _sd_card_size / 1024 / 1024);
 
-    // set SEVONPEND flag so that interrupts set the event flag even inside a critical section
-    unsafe { cp.SCB.scr.modify(|reg| reg | 0x10) }
+            // up the frequency after initialization
+            let mut config = spi::Config::default();
+            config.frequency = 12_000_000;
+            sd_card.spi(|dev| dev.bus_mut().set_config(&config));
+
+            Some(sd_card)
+        } else {
+            None
+        }
+    }
+    .and_then(|sd_card| toto_flight::black_box::Storage::new(sd_card).ok());
 
     #[cfg(feature = "cpu-usage")]
-    let mut cpu_usage_tracker = toto_flight::cpu_usage::Tracker::new();
+    let mut cpu_usage_tracker = toto_flight::cpu_usage::Tracker::new(&mut _cp);
 
     loop {
+        maybe_black_box.take_if(|black_box| black_box.poll().is_err());
+
         #[cfg(feature = "cpu-usage")]
-        cpu_usage_tracker.on_idle(&mut cp);
+        cpu_usage_tracker.on_idle(&mut _cp);
 
         #[cfg(not(feature = "cpu-usage"))]
         cortex_m::asm::wfi();

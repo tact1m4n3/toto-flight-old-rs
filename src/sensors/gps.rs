@@ -1,7 +1,26 @@
+use core::cell::RefCell;
+
+use embassy_sync::blocking_mutex::Mutex;
 use embedded_io_async::BufRead;
+
+use crate::RawMutex;
 use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRef};
 
 use crate::utils::read_process_and_consume;
+
+pub static DATA: Mutex<RawMutex, RefCell<Data>> = Mutex::new(RefCell::new(Data {
+    latitude: 0.0,
+    longitude: 0.0,
+    altitude: 0.0,
+    h_acc: f32::INFINITY,
+    v_acc: f32::INFINITY,
+    speed: 0.0,
+    heading: 0.0,
+    num_sat: 0,
+    hdop: f32::INFINITY,
+    fix_type: FixType::Undefined,
+    vertical_velocity: 0.0,
+}));
 
 pub async fn task<R: BufRead>(mut reader: R) {
     let mut parser: ublox::Parser<FixedBuffer<128>> = Parser::new_fixed();
@@ -27,7 +46,7 @@ pub async fn task<R: BufRead>(mut reader: R) {
                             vertical_velocity: pvt.vel_down() as f32,
                         };
 
-                        super::DATA.lock(|state| state.borrow_mut().gps = data);
+                        DATA.lock(|state| *state.borrow_mut() = data);
                     }
                 } else {
                     warn!("failed to parse ublox packet");

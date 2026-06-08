@@ -8,7 +8,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 use num_traits::Float;
 
 use crate::{
-    RawMutex,
+    RawMutex, black_box,
     config::{self, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::Motor,
     receiver, sensors,
@@ -127,8 +127,11 @@ pub async fn task_command_guardian() {
 
         info!("failsafe has come to an end");
         SHARED_STATE.lock(|state| {
-            state.borrow_mut().failsafe = true;
+            state.borrow_mut().failsafe = false;
         });
+
+        // When the signal is recovered we can disable recording
+        black_box::set_recording_enabled(false);
 
         loop {
             // Receive command loop. No failsafe in sight
@@ -154,6 +157,9 @@ pub async fn task_command_guardian() {
                                     info!("arming failed");
                                     shared_state.arm_state = ArmState::ArmFailed;
                                 }
+
+                                black_box::begin_new_file();
+                                black_box::set_recording_enabled(true);
                             }
                             Command::Disarmed => (),
                         },
@@ -161,6 +167,8 @@ pub async fn task_command_guardian() {
                             if let Command::Disarmed = command {
                                 info!("disarmed");
                                 shared_state.arm_state = ArmState::Disarmed;
+
+                                black_box::set_recording_enabled(false);
                             }
                         }
                     }
@@ -241,7 +249,7 @@ pub async fn task_inner_loop<const MOTORS: usize, const SERVOS: usize, M: Motor,
                         };
 
                         maybe_rate_control.map(|rate_control| {
-                            let gyro = sensors::DATA.lock(|data| data.borrow().gyro);
+                            let gyro = sensors::imu::DATA.lock(|data| data.borrow().gyro);
                             rate_control.target_manual(
                                 &mut state.rate_controller,
                                 &gyro,
@@ -341,7 +349,7 @@ pub async fn task_outer_loop() {
                 roll_angle,
                 pitch_angle,
             } => {
-                let attitude = sensors::DATA.lock(|data| data.borrow().attitude);
+                let attitude = sensors::fusion::DATA.lock(|data| data.borrow().attitude);
 
                 Some(
                     AngleControl {

@@ -16,10 +16,10 @@ use crate::{
 pub static STATE: Mutex<RawMutex, RefCell<State>> = Mutex::new(RefCell::new(State {
     channels: [1500; 16],
     link_stats: LinkStats {
-        link_quality_uplink: 0,
-        link_quality_downlink: 0,
-        rssi_uplink: 255,
-        rssi_downlink: 255,
+        uplink_link_quality: 0,
+        downlink_link_quality: 0,
+        uplink_rssi: 255,
+        downlink_rssi: 255,
     },
     command: Command::Disarmed,
 }));
@@ -45,10 +45,10 @@ impl State {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LinkStats {
-    pub link_quality_uplink: u8,
-    pub link_quality_downlink: u8,
-    pub rssi_uplink: u8,
-    pub rssi_downlink: u8,
+    pub uplink_link_quality: u8,
+    pub uplink_rssi: u8,
+    pub downlink_link_quality: u8,
+    pub downlink_rssi: u8,
 }
 
 pub async fn task_channels_manager() {
@@ -144,14 +144,14 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
                     }
                     crsf::Packet::LinkStatistics(ls) => {
                         let link_stats = LinkStats {
-                            link_quality_uplink: ls.uplink_link_quality,
-                            link_quality_downlink: ls.downlink_link_quality,
-                            rssi_uplink: if ls.active_antenna == 1 {
+                            uplink_link_quality: ls.uplink_link_quality,
+                            uplink_rssi: if ls.active_antenna == 1 {
                                 ls.uplink_rssi_1
                             } else {
                                 ls.uplink_rssi_2
                             },
-                            rssi_downlink: ls.downlink_rssi,
+                            downlink_link_quality: ls.downlink_link_quality,
+                            downlink_rssi: ls.downlink_rssi,
                         };
                         STATE.lock(|state| state.borrow_mut().link_stats = link_stats);
                     }
@@ -178,7 +178,7 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
         let mut buf: [u8; crsf::MAX_PACKET_LEN] = [0; crsf::MAX_PACKET_LEN];
 
         {
-            let battery = sensors::DATA.lock(|state| state.borrow().battery);
+            let battery = sensors::battery::DATA.lock(|data| *data.borrow());
 
             let packet = crsf::BatterySensor {
                 voltage: (battery.voltage * 10.0) as i16,    // already in mV
