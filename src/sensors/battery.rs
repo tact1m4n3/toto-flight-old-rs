@@ -1,13 +1,12 @@
-use core::cell::RefCell;
-
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::{Duration, Ticker};
 
-use crate::RawMutex;
+use crate::{
+    RawMutex,
+    drivers::battery::BatterySensor,
+    utils::{DurationExt, SyncWatch},
+};
 
-use crate::{drivers::battery::BatterySensor, utils::DurationExt};
-
-pub static DATA: Mutex<RawMutex, RefCell<Data>> = Mutex::new(RefCell::new(Data::DEFAULT));
+pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data::DEFAULT);
 
 pub async fn task<B: BatterySensor>(mut sensor: B) {
     const PERIOD: Duration = Duration::from_hz(10);
@@ -33,7 +32,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
             current: data.current,
             capacity_used,
         };
-        DATA.lock(|cs| *cs.borrow_mut() = data);
+        DATA.set(data);
     }
 }
 

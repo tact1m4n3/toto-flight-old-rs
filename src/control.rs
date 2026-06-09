@@ -48,6 +48,14 @@ impl SharedState {
     }
 }
 
+pub fn arm_state() -> ArmState {
+    SHARED_STATE.lock(|state| state.borrow().arm_state)
+}
+
+pub fn in_failsafe() -> bool {
+    SHARED_STATE.lock(|state| state.borrow().failsafe)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ArmState {
     Disarmed,
@@ -136,7 +144,7 @@ pub async fn task_command_guardian() {
                 embassy_time::with_timeout(VALID_COMMAND_RATE, HEARTBEAT_RECEIVER_COMMAND.wait())
                     .await
             {
-                let command = receiver::STATE.lock(|state| *state.borrow().command());
+                let command = receiver::COMMAND.get();
 
                 SHARED_STATE.lock(|shared_state| {
                     let mut shared_state = shared_state.borrow_mut();
@@ -241,7 +249,7 @@ pub async fn task_inner_loop<const MOTORS: usize, const SERVOS: usize, M: Motor,
                         };
 
                         maybe_rate_control.map(|rate_control| {
-                            let gyro = sensors::imu::DATA.lock(|data| data.borrow().gyro);
+                            let gyro = sensors::imu::DATA.get().gyro;
                             rate_control.target_manual(
                                 &mut state.rate_controller,
                                 &gyro,
@@ -341,7 +349,7 @@ pub async fn task_outer_loop() {
                 roll_angle,
                 pitch_angle,
             } => {
-                let attitude = sensors::fusion::DATA.lock(|data| data.borrow().attitude);
+                let attitude = sensors::fusion::ATTITUDE.get();
 
                 Some(
                     AngleControl {

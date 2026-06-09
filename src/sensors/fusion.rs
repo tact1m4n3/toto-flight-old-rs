@@ -1,19 +1,14 @@
-use core::cell::RefCell;
-
 use ahrs::Ahrs;
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::{Duration, Ticker};
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::{
     RawMutex,
-    utils::{DurationExt, NalgebraQuatExt, NalgebraVec3Ext},
+    utils::{DurationExt, NalgebraQuatExt, SyncWatch},
 };
 
-pub static DATA: Mutex<RawMutex, RefCell<Data>> = Mutex::new(RefCell::new(Data {
-    position: Vector3::ZEROS,
-    attitude: UnitQuaternion::IDENTITY,
-}));
+pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> =
+    SyncWatch::new(UnitQuaternion::IDENTITY);
 
 pub async fn task() {
     const PERIOD: Duration = Duration::from_hz(100);
@@ -24,10 +19,9 @@ pub async fn task() {
     loop {
         ticker.next().await;
 
-        let (gyro, accel) = super::imu::DATA.lock(|state| {
-            let state = state.borrow();
-            (state.gyro, state.accel)
-        });
+        let imu = super::imu::DATA.get();
+        let gyro = imu.gyro;
+        let accel = imu.accel;
         let gyro_nwu = Vector3::new(gyro.x, -gyro.y, -gyro.z);
         let accel_nwu = Vector3::new(accel.x, -accel.y, -accel.z);
 
@@ -37,9 +31,7 @@ pub async fn task() {
             Err(_) => filter.update_gyro(&gyro_nwu),
         };
 
-        DATA.lock(|state| {
-            state.borrow_mut().attitude = *quat;
-        });
+        ATTITUDE.set(*quat);
     }
 }
 

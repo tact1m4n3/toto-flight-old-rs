@@ -6,8 +6,8 @@ use embedded_hal::spi::SpiDevice;
 use embedded_sdmmc::{RawDirectory, RawFile, SdCard, VolumeManager};
 use heapless::String;
 
-use crate::sensors;
-use crate::{control, receiver};
+use crate::{RawMutex, sensors};
+use crate::{control, receiver, utils::SyncWatchReader};
 
 mod ardupilot_black_box_logger;
 use ardupilot_black_box_logger as log;
@@ -18,7 +18,7 @@ const LOG_FILE_EXTENSION: &str = "BIN";
 const MAX_FILE_NAME_LEN: usize = LOG_FILE_PREFIX.len() + 3 + ".".len() + LOG_FILE_EXTENSION.len();
 const _: () = assert!(MAX_FILE_NAME_LEN <= 11);
 
-const LOG_RATE_PERIOD: Duration = Duration::from_hz(10);
+const LOG_RATE_PERIOD: Duration = Duration::from_hz(500);
 
 pub const MAX_DIRS: usize = 1;
 pub const MAX_FILES: usize = 1;
@@ -34,6 +34,13 @@ pub struct Storage<SPI: SpiDevice, D: DelayNs> {
     next_blackbox_log_id: u16,
     last_tick: Instant,
     file_close_request_instant: Option<Instant>,
+
+    imu_watcher: SyncWatchReader<'static, RawMutex, sensors::imu::Data>,
+    gps_watcher: SyncWatchReader<'static, RawMutex, sensors::gps::Data>,
+    battery_watcher: SyncWatchReader<'static, RawMutex, sensors::battery::Data>,
+    attitude_watcher: SyncWatchReader<'static, RawMutex, nalgebra::UnitQuaternion<f32>>,
+    channels_watcher: SyncWatchReader<'static, RawMutex, [u16; 16]>,
+    link_stats_watcher: SyncWatchReader<'static, RawMutex, receiver::LinkStats>,
 }
 
 impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
@@ -68,6 +75,13 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             next_blackbox_log_id,
             last_tick: Instant::MIN,
             file_close_request_instant: None,
+
+            imu_watcher: sensors::imu::DATA.watcher(),
+            gps_watcher: sensors::gps::DATA.watcher(),
+            battery_watcher: sensors::battery::DATA.watcher(),
+            attitude_watcher: sensors::fusion::ATTITUDE.watcher(),
+            channels_watcher: receiver::CHANNELS.watcher(),
+            link_stats_watcher: receiver::LINK_STATS.watcher(),
         })
     }
 
@@ -78,10 +92,8 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
         }
         self.last_tick = now;
 
-        let (arm_state, failsafe) = control::SHARED_STATE.lock(|state| {
-            let state = state.borrow();
-            (state.arm_state(), state.in_failsafe())
-        });
+        let arm_state = control::arm_state();
+        let failsafe = control::in_failsafe();
 
         if arm_state.is_armed() && self.active_file.is_none() {
             let log_id = self.next_blackbox_log_id;
@@ -153,18 +165,12 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
 
         let timestamp_us = now.as_micros();
 
-        {
-            let gyro = sensors::imu::DATA.lock(|data| data.borrow().gyro);
-            log::write_gyro(&mut file, timestamp_us, gyro)?;
+        if let Some(imu) = self.imu_watcher.get_if_changed() {
+            log::write_gyro(&mut file, timestamp_us, imu.gyro)?;
+            log::write_accel(&mut file, timestamp_us, imu.accel)?;
         }
 
-        {
-            let accel = sensors::imu::DATA.lock(|data| data.borrow().accel);
-            log::write_accel(&mut file, timestamp_us, accel)?;
-        }
-
-        {
-            let gps = sensors::gps::DATA.lock(|data| *data.borrow());
+        if let Some(gps) = self.gps_watcher.get_if_changed() {
             log::write_gps(
                 &mut file,
                 timestamp_us,
@@ -180,8 +186,7 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             )?;
         }
 
-        {
-            let battery = sensors::battery::DATA.lock(|data| *data.borrow());
+        if let Some(battery) = self.battery_watcher.get_if_changed() {
             log::write_bat(
                 &mut file,
                 timestamp_us,
@@ -191,8 +196,7 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             )?;
         }
 
-        {
-            let attitude = sensors::fusion::DATA.lock(|data| data.borrow().attitude);
+        if let Some(attitude) = self.attitude_watcher.get_if_changed() {
             let (roll, pitch, yaw) = attitude.euler_angles();
             log::write_attitude(
                 &mut file,
@@ -203,13 +207,11 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             )?;
         }
 
-        {
-            let channels = receiver::STATE.lock(|state| *state.borrow().channels());
+        if let Some(channels) = self.channels_watcher.get_if_changed() {
             log::write_rc_channels(&mut file, timestamp_us, &channels)?;
         }
 
-        {
-            let stats = receiver::STATE.lock(|state| *state.borrow().link_stats());
+        if let Some(stats) = self.link_stats_watcher.get_if_changed() {
             log::write_rc_link_stats(
                 &mut file,
                 timestamp_us,

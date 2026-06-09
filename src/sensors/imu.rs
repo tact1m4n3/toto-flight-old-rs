@@ -1,13 +1,11 @@
-use core::cell::RefCell;
-
-use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
+use embassy_sync::signal::Signal;
 use nalgebra::{Matrix3, Rotation3, Vector3};
 
 use crate::{
     RawMutex, config,
     control::ArmBlocker,
     drivers::imu::{Data as ImuSample, ImuSensor},
-    utils::NalgebraVec3Ext,
+    utils::{NalgebraVec3Ext, SyncWatch},
 };
 
 static TAKE_SAMPLE_SIGNAL: Signal<RawMutex, ()> = Signal::new();
@@ -15,10 +13,10 @@ static TAKE_SAMPLE_SIGNAL: Signal<RawMutex, ()> = Signal::new();
 static CALIBRATE: Signal<RawMutex, ()> = Signal::new();
 static IMU_RAW_SAMPLE: Signal<RawMutex, ImuSample> = Signal::new();
 
-pub static DATA: Mutex<RawMutex, RefCell<Data>> = Mutex::new(RefCell::new(Data {
+pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
     gyro: Vector3::ZEROS,
     accel: Vector3::ZEROS,
-}));
+});
 
 pub fn start_calibration() {
     CALIBRATE.signal(());
@@ -52,11 +50,7 @@ pub async fn task_read<I: ImuSensor>(mut imu: I) {
         gyro *= core::f32::consts::PI / 180.0; // to rad/s from dps
         accel *= 9.80665; // to m/s^2 from g
 
-        DATA.lock(|state| {
-            let mut state = state.borrow_mut();
-            state.gyro = gyro;
-            state.accel = accel;
-        });
+        DATA.set(Data { gyro, accel });
     }
 }
 

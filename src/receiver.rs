@@ -1,7 +1,7 @@
-use core::{cell::RefCell, ops::RangeInclusive};
+use core::ops::RangeInclusive;
 
 use crsf::PayloadDump;
-use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
@@ -10,38 +10,18 @@ use crate::{
     RawMutex,
     control::{self, Command},
     sensors,
-    utils::{US_TO_NEG_ONE_ONE, read_process_and_consume},
+    utils::{SyncWatch, US_TO_NEG_ONE_ONE, read_process_and_consume},
 };
 
-pub static STATE: Mutex<RawMutex, RefCell<State>> = Mutex::new(RefCell::new(State {
-    channels: [1500; 16],
-    link_stats: LinkStats {
-        uplink_link_quality: 0,
-        downlink_link_quality: 0,
-        uplink_rssi: 255,
-        downlink_rssi: 255,
-    },
-    command: Command::Disarmed,
-}));
+pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new([1500; 16]);
+pub static COMMAND: SyncWatch<RawMutex, Command> = SyncWatch::new(Command::Disarmed);
+pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats {
+    uplink_link_quality: 0,
+    downlink_link_quality: 0,
+    uplink_rssi: 255,
+    downlink_rssi: 255,
+});
 static CHANNELS_RECEIVED: Signal<RawMutex, ()> = Signal::new();
-
-pub struct State {
-    channels: [u16; 16],
-    link_stats: LinkStats,
-    command: Command,
-}
-
-impl State {
-    pub fn channels(&self) -> &[u16; 16] {
-        &self.channels
-    }
-    pub fn link_stats(&self) -> &LinkStats {
-        &self.link_stats
-    }
-    pub fn command(&self) -> &Command {
-        &self.command
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct LinkStats {
@@ -77,7 +57,7 @@ pub async fn task_channels_manager() {
 
     loop {
         CHANNELS_RECEIVED.wait().await;
-        let channels = STATE.lock(|state| state.borrow().channels);
+        let channels = CHANNELS.get();
 
         arm_switch.update(&channels);
 
@@ -115,7 +95,7 @@ pub async fn task_channels_manager() {
             Command::Disarmed
         };
 
-        STATE.lock(|state| state.borrow_mut().command = command);
+        COMMAND.set(command);
         control::HEARTBEAT_RECEIVER_COMMAND.signal(());
     }
 }
@@ -139,7 +119,7 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
                     crsf::Packet::RcChannelsPacked(raw_channels) => {
                         let channels: [u16; 16] =
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
-                        STATE.lock(|state| state.borrow_mut().channels = channels);
+                        CHANNELS.set(channels);
                         CHANNELS_RECEIVED.signal(());
                     }
                     crsf::Packet::LinkStatistics(ls) => {
@@ -153,7 +133,7 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
                             downlink_link_quality: ls.downlink_link_quality,
                             downlink_rssi: ls.downlink_rssi,
                         };
-                        STATE.lock(|state| state.borrow_mut().link_stats = link_stats);
+                        LINK_STATS.set(link_stats);
                     }
                     _ => {}
                 }
@@ -178,7 +158,7 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
         let mut buf: [u8; crsf::MAX_PACKET_LEN] = [0; crsf::MAX_PACKET_LEN];
 
         {
-            let battery = sensors::battery::DATA.lock(|data| *data.borrow());
+            let battery = sensors::battery::DATA.get();
 
             let packet = crsf::BatterySensor {
                 voltage: (battery.voltage * 10.0) as i16,    // already in mV
