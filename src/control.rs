@@ -20,7 +20,7 @@ use crate::{
 pub static HEARTBEAT_RECEIVER_COMMAND: Signal<RawMutex, ()> = Signal::new();
 pub static AUTO_TUNE: Signal<RawMutex, bool> = Signal::new();
 
-pub static SHARED_STATE: Mutex<RawMutex, RefCell<SharedState>> =
+static SHARED_STATE: Mutex<RawMutex, RefCell<SharedState>> =
     Mutex::new(RefCell::new(SharedState {
         arm_state: ArmState::ArmFailed,
         arm_blockers: 0,
@@ -30,7 +30,7 @@ pub static SHARED_STATE: Mutex<RawMutex, RefCell<SharedState>> =
         slow_loop_target_rate: None,
     }));
 
-pub struct SharedState {
+struct SharedState {
     arm_state: ArmState,
     arm_blockers: u32,
     failsafe: bool,
@@ -39,21 +39,19 @@ pub struct SharedState {
     slow_loop_target_rate: Option<RateControl>,
 }
 
-impl SharedState {
-    pub fn arm_state(&self) -> ArmState {
-        self.arm_state
-    }
-    pub fn in_failsafe(&self) -> bool {
-        self.failsafe
-    }
+pub fn status() -> Status {
+    SHARED_STATE.lock(|state| {
+        let state = state.borrow();
+        Status {
+            arm_state: state.arm_state,
+            failsafe: state.failsafe,
+        }
+    })
 }
 
-pub fn arm_state() -> ArmState {
-    SHARED_STATE.lock(|state| state.borrow().arm_state)
-}
-
-pub fn in_failsafe() -> bool {
-    SHARED_STATE.lock(|state| state.borrow().failsafe)
+pub struct Status {
+    pub arm_state: ArmState,
+    pub failsafe: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -274,7 +272,7 @@ pub async fn task_inner_loop<const MOTORS: usize, const SERVOS: usize, M: Motor,
         loop {
             // Waiting to start mid point calibration, requires the drone to be armed
             loop {
-                if AUTO_TUNE.wait().await && arm_state().is_armed() {
+                if AUTO_TUNE.wait().await && status().arm_state.is_armed() {
                     break;
                 }
             }

@@ -308,6 +308,8 @@ async fn main(thread_spawner: Spawner) -> ! {
     realtime_spawner.spawn(task_control_inner_loop(outputs).unwrap());
 
     low_prio_spawner.spawn(task_battery(battery_sensor).unwrap());
+    realtime_spawner.spawn(task_command_guardian().unwrap());
+    realtime_spawner.spawn(task_control_outer_loop().unwrap());
     low_prio_spawner.spawn(task_gps(gps_uart_rx).unwrap());
     low_prio_spawner.spawn(task_sensor_fusion().unwrap());
     low_prio_spawner.spawn(task_imu_calibrate().unwrap());

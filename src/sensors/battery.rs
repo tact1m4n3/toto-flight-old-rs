@@ -6,7 +6,11 @@ use crate::{
     utils::{DurationExt, SyncWatch},
 };
 
-pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data::DEFAULT);
+pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
+    voltage: 0.0,
+    current: 0.0,
+    capacity_used: 0.0,
+});
 
 pub async fn task<B: BatterySensor>(mut sensor: B) {
     const PERIOD: Duration = Duration::from_hz(10);
@@ -44,12 +48,4 @@ pub struct Data {
     pub current: f64,
     /// in mAh
     pub capacity_used: f64,
-}
-
-impl Data {
-    pub const DEFAULT: Data = Data {
-        voltage: 0.0,
-        current: 0.0,
-        capacity_used: 0.0,
-    };
 }

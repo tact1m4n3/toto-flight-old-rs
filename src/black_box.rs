@@ -93,10 +93,9 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
         }
         self.last_tick = now;
 
-        let arm_state = control::arm_state();
-        let failsafe = control::in_failsafe();
+        let status = control::status();
 
-        if arm_state.is_armed() && self.active_file.is_none() {
+        if status.arm_state.is_armed() && self.active_file.is_none() {
             let log_id = self.next_blackbox_log_id;
             if log_id > MAX_LOG_ID {
                 warn!("max log id reached, not creating new black box log");
@@ -112,6 +111,7 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
                 LOG_FILE_PREFIX, log_id, LOG_FILE_EXTENSION
             )
             .unwrap();
+            info!("starting new log file: {}", log_file_name.as_str());
 
             let root_dir = self
                 .root_dir
@@ -130,16 +130,17 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             self.root_dir = Some(root_dir.to_raw_directory());
         }
 
-        if arm_state.is_armed() {
+        if status.arm_state.is_armed() {
             self.file_close_request_instant = None;
         } else if let Some(file_close_request_instant) = self.file_close_request_instant {
-            if now - file_close_request_instant >= STOP_RECORDING_DELAY
-                && let Some(raw_file) = self.active_file.take()
-            {
-                let file = raw_file.to_file(&self.volume_manager);
-                file.close()?;
+            if now - file_close_request_instant >= STOP_RECORDING_DELAY {
+                self.file_close_request_instant = None;
+                if let Some(raw_file) = self.active_file.take() {
+                    let file = raw_file.to_file(&self.volume_manager);
+                    file.close()?;
+                }
             }
-        } else if !arm_state.is_armed() || failsafe {
+        } else if (!status.arm_state.is_armed() || status.failsafe) && self.active_file.is_some() {
             self.file_close_request_instant = Some(now);
         }
 
@@ -154,7 +155,6 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
         }
     }
 
-    /// Assumes there is an active file.
     fn do_log(&mut self, now: Instant) -> Result<()> {
         let Some(raw_file) = self.active_file.take() else {
             return Ok(());
