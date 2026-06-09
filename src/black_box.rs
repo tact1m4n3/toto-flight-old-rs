@@ -1,4 +1,3 @@
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::{fmt::Write, ops::ControlFlow};
 
 use embassy_time::{Duration, Instant};
@@ -7,8 +6,8 @@ use embedded_hal::spi::SpiDevice;
 use embedded_sdmmc::{RawDirectory, RawFile, SdCard, VolumeManager};
 use heapless::String;
 
-use crate::receiver;
 use crate::sensors;
+use crate::{control, receiver};
 
 mod ardupilot_black_box_logger;
 use ardupilot_black_box_logger as log;
@@ -20,17 +19,6 @@ const MAX_FILE_NAME_LEN: usize = LOG_FILE_PREFIX.len() + 3 + ".".len() + LOG_FIL
 const _: () = assert!(MAX_FILE_NAME_LEN <= 11);
 
 const LOG_RATE_PERIOD: Duration = Duration::from_hz(10);
-
-static RECORDING: AtomicBool = AtomicBool::new(false);
-static NEW_FILE_FLAG: AtomicBool = AtomicBool::new(false);
-
-pub fn set_recording_enabled(enabled: bool) {
-    RECORDING.store(enabled, Ordering::Relaxed);
-}
-
-pub fn begin_new_file() {
-    NEW_FILE_FLAG.store(true, Ordering::Relaxed);
-}
 
 pub const MAX_DIRS: usize = 1;
 pub const MAX_FILES: usize = 1;
@@ -45,6 +33,7 @@ pub struct Storage<SPI: SpiDevice, D: DelayNs> {
     active_file: Option<RawFile>,
     next_blackbox_log_id: u16,
     last_tick: Instant,
+    file_close_request_instant: Option<Instant>,
 }
 
 impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
@@ -78,6 +67,7 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             active_file: None,
             next_blackbox_log_id,
             last_tick: Instant::MIN,
+            file_close_request_instant: None,
         })
     }
 
@@ -88,18 +78,12 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
         }
         self.last_tick = now;
 
-        if !RECORDING.load(Ordering::Relaxed) {
-            return Ok(());
-        }
+        let (arm_state, failsafe) = control::SHARED_STATE.lock(|state| {
+            let state = state.borrow();
+            (state.arm_state(), state.in_failsafe())
+        });
 
-        if NEW_FILE_FLAG.swap(false, Ordering::Relaxed)
-            && let Some(raw_file) = self.active_file.take()
-        {
-            let file = raw_file.to_file(&self.volume_manager);
-            file.close()?;
-        }
-
-        if self.active_file.is_none() {
+        if arm_state.is_armed() && self.active_file.is_none() {
             let log_id = self.next_blackbox_log_id;
             if log_id > MAX_LOG_ID {
                 warn!("max log id reached, not creating new black box log");
@@ -133,6 +117,22 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             self.root_dir = Some(root_dir.to_raw_directory());
         }
 
+        // delay the closing of the file by 1 second after disarming without failsafe
+        if arm_state.is_armed() || failsafe {
+            self.file_close_request_instant = Some(now + Duration::from_secs(1));
+        }
+
+        if let Some(file_close_request_instant) = self.file_close_request_instant {
+            if file_close_request_instant <= now
+                && let Some(raw_file) = self.active_file.take()
+            {
+                let file = raw_file.to_file(&self.volume_manager);
+                file.close()?;
+            }
+        } else {
+            self.file_close_request_instant = Some(now);
+        }
+
         match self.do_log(now) {
             Ok(()) => Ok(()),
             // means we exceeded 4GB file in which case we just create another file
@@ -146,11 +146,10 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
 
     /// Assumes there is an active file.
     fn do_log(&mut self, now: Instant) -> Result<()> {
-        let mut file = self
-            .active_file
-            .take()
-            .unwrap()
-            .to_file(&self.volume_manager);
+        let Some(raw_file) = self.active_file.take() else {
+            return Ok(());
+        };
+        let mut file = raw_file.to_file(&self.volume_manager);
 
         let timestamp_us = now.as_micros();
 

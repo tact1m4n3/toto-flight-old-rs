@@ -8,7 +8,7 @@ use nalgebra::{UnitQuaternion, Vector3};
 use num_traits::Float;
 
 use crate::{
-    RawMutex, black_box,
+    RawMutex,
     config::{self, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::Motor,
     receiver, sensors,
@@ -130,9 +130,6 @@ pub async fn task_command_guardian() {
             state.borrow_mut().failsafe = false;
         });
 
-        // When the signal is recovered we can disable recording
-        black_box::set_recording_enabled(false);
-
         loop {
             // Receive command loop. No failsafe in sight
             while let Ok(()) =
@@ -157,9 +154,6 @@ pub async fn task_command_guardian() {
                                     info!("arming failed");
                                     shared_state.arm_state = ArmState::ArmFailed;
                                 }
-
-                                black_box::begin_new_file();
-                                black_box::set_recording_enabled(true);
                             }
                             Command::Disarmed => (),
                         },
@@ -167,8 +161,6 @@ pub async fn task_command_guardian() {
                             if let Command::Disarmed = command {
                                 info!("disarmed");
                                 shared_state.arm_state = ArmState::Disarmed;
-
-                                black_box::set_recording_enabled(false);
                             }
                         }
                     }
