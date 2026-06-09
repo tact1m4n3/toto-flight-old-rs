@@ -303,13 +303,13 @@ async fn main(thread_spawner: Spawner) -> ! {
     // This is realtime because it is doing blocking stuff in a critical section anyways
     realtime_spawner.spawn(task_config(flash, FLASH_STORAGE_RANGE).unwrap());
 
+    realtime_spawner.spawn(task_control_inner_loop(outputs).unwrap());
     realtime_spawner.spawn(task_imu_interrupt_listener(imu_interrupt_pin).unwrap());
     realtime_spawner.spawn(task_imu_read(imu_sensor).unwrap());
-    realtime_spawner.spawn(task_control_inner_loop(outputs).unwrap());
 
     low_prio_spawner.spawn(task_battery(battery_sensor).unwrap());
-    realtime_spawner.spawn(task_command_guardian().unwrap());
-    realtime_spawner.spawn(task_control_outer_loop().unwrap());
+    low_prio_spawner.spawn(task_command_guardian().unwrap());
+    low_prio_spawner.spawn(task_control_outer_loop().unwrap());
     low_prio_spawner.spawn(task_gps(gps_uart_rx).unwrap());
     low_prio_spawner.spawn(task_sensor_fusion().unwrap());
     low_prio_spawner.spawn(task_imu_calibrate().unwrap());
