@@ -19,6 +19,7 @@ const MAX_FILE_NAME_LEN: usize = LOG_FILE_PREFIX.len() + 3 + ".".len() + LOG_FIL
 const _: () = assert!(MAX_FILE_NAME_LEN <= 11);
 
 const LOG_RATE_PERIOD: Duration = Duration::from_hz(500);
+const STOP_RECORDING_DELAY: Duration = Duration::from_secs(2);
 
 pub const MAX_DIRS: usize = 1;
 pub const MAX_FILES: usize = 1;
@@ -129,19 +130,16 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             self.root_dir = Some(root_dir.to_raw_directory());
         }
 
-        // delay the closing of the file by 1 second after disarming without failsafe
-        if arm_state.is_armed() || failsafe {
-            self.file_close_request_instant = Some(now + Duration::from_secs(1));
-        }
-
-        if let Some(file_close_request_instant) = self.file_close_request_instant {
-            if file_close_request_instant <= now
+        if arm_state.is_armed() {
+            self.file_close_request_instant = None;
+        } else if let Some(file_close_request_instant) = self.file_close_request_instant {
+            if now - file_close_request_instant >= STOP_RECORDING_DELAY
                 && let Some(raw_file) = self.active_file.take()
             {
                 let file = raw_file.to_file(&self.volume_manager);
                 file.close()?;
             }
-        } else {
+        } else if !arm_state.is_armed() || failsafe {
             self.file_close_request_instant = Some(now);
         }
 

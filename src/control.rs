@@ -274,9 +274,7 @@ pub async fn task_inner_loop<const MOTORS: usize, const SERVOS: usize, M: Motor,
         loop {
             // Waiting to start mid point calibration, requires the drone to be armed
             loop {
-                if AUTO_TUNE.wait().await
-                    && SHARED_STATE.lock(|state| state.borrow().arm_state.is_armed())
-                {
+                if AUTO_TUNE.wait().await && arm_state().is_armed() {
                     break;
                 }
             }
