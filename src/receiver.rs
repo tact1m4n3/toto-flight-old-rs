@@ -161,8 +161,8 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
             let battery = sensors::battery::DATA.get();
 
             let packet = crsf::BatterySensor {
-                voltage: (battery.voltage * 10.0) as i16,    // already in mV
-                current: (battery.current / 10.0) as i16,    // already in mA
+                voltage: (battery.voltage * 10.0) as i16,
+                current: (battery.current * 10.0) as i16,
                 capacity_used: battery.capacity_used as u32, // already in mAh
                 remaining: 0,                                // we don't have this info
             };

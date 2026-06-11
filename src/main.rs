@@ -8,12 +8,14 @@ use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_rp::{
     Peri, dma, flash, gpio, i2c,
     interrupt::{self, InterruptExt},
-    peripherals, pio,
+    peripherals,
+    peripherals::*,
+    pio,
     pio_programs::ws2812,
     pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
-use embassy_time::Delay;
+use embassy_time::{Delay, Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::sdcard::spi::AcquireOpts;
 use fixed::FixedU16;
@@ -56,10 +58,12 @@ type UsbDriver = usb::Driver<'static, USB>;
 type PioWs2812Driver = ws2812::PioWs2812<'static, PIO0, 0, ws2812::Grb>;
 
 assign_resources! {
-    pwm_outputs: PwmOutputsPeripherals {
-        slice_esc_and_left_elevon: PWM_SLICE5,
+    motor_outputs: MotorOutputsPeripherals {
+        slice_esc: PWM_SLICE3,
+        slice_left_elevon: PWM_SLICE5,
         slice_right_elevon: PWM_SLICE7,
-        esc: PIN_10,
+        esc_signal: PIN_6,
+        esc_telemetry: PIN_16,
         left_elevon: PIN_11,
         right_elevon: PIN_15,
     },
@@ -165,10 +169,18 @@ async fn main(thread_spawner: Spawner) -> ! {
         config.top = pwm_top;
         config.divider = FixedU16::from_num(pwm_divider);
 
-        let (Some(throttle_pwm), Some(left_elevon_pwm)) = pwm::Pwm::new_output_ab(
-            r.pwm_outputs.slice_esc_and_left_elevon,
-            r.pwm_outputs.esc,
-            r.pwm_outputs.left_elevon,
+        let (Some(esc_pwm), None) = pwm::Pwm::new_output_a(
+            r.motor_outputs.slice_esc,
+            r.motor_outputs.esc_signal,
+            config.clone(),
+        )
+        .split() else {
+            unreachable!()
+        };
+
+        let (None, Some(left_elevon_pwm)) = pwm::Pwm::new_output_b(
+            r.motor_outputs.slice_left_elevon,
+            r.motor_outputs.left_elevon,
             config.clone(),
         )
         .split() else {
@@ -176,8 +188,8 @@ async fn main(thread_spawner: Spawner) -> ! {
         };
 
         let (None, Some(right_elevon_pwm)) = pwm::Pwm::new_output_b(
-            r.pwm_outputs.slice_right_elevon,
-            r.pwm_outputs.right_elevon,
+            r.motor_outputs.slice_right_elevon,
+            r.motor_outputs.right_elevon,
             config.clone(),
         )
         .split() else {
@@ -185,7 +197,7 @@ async fn main(thread_spawner: Spawner) -> ! {
         };
 
         toto_flight::control::Outputs {
-            motors: [throttle_pwm],
+            motors: [esc_pwm],
             servos: [left_elevon_pwm, right_elevon_pwm],
         }
     };
@@ -300,6 +312,8 @@ async fn main(thread_spawner: Spawner) -> ! {
 
     info!("setup done. spawning tasks");
 
+    realtime_spawner.spawn(task_reboot().unwrap());
+
     // This is realtime because it is doing blocking stuff in a critical section anyways
     realtime_spawner.spawn(task_config(flash, FLASH_STORAGE_RANGE).unwrap());
 
@@ -356,6 +370,20 @@ async fn main(thread_spawner: Spawner) -> ! {
 
         #[cfg(not(feature = "cpu-usage"))]
         cortex_m::asm::wfi();
+    }
+}
+
+#[embassy_executor::task]
+async fn task_reboot() {
+    loop {
+        toto_flight::REBOOT.wait().await;
+        Timer::after(Duration::from_millis(100)).await;
+        if let Ok(_guard) = toto_flight::control::ArmBlocker::new() {
+            info!("rebooting...");
+            cortex_m::peripheral::SCB::sys_reset();
+        } else {
+            warn!("reboot requested but system is armed, ignoring");
+        }
     }
 }
 

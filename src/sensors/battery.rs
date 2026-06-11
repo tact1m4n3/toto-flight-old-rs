@@ -28,7 +28,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
         };
 
         // trapezoidal integration
-        capacity_used += data.current.midpoint(prev_current) * PERIOD.dt_f64() / 3600.0;
+        capacity_used += data.current.midpoint(prev_current) * 1000.0 * (PERIOD.dt_f64() / 3600.0);
         prev_current = data.current;
 
         let data = Data {
@@ -42,9 +42,9 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
 
 #[derive(Clone, Copy)]
 pub struct Data {
-    /// in mV
+    /// in V
     pub voltage: f64,
-    /// in mA
+    /// in A
     pub current: f64,
     /// in mAh
     pub capacity_used: f64,

@@ -1,3 +1,9 @@
+use core::fmt::Write;
+
+use heapless::String;
+
+use crate::config;
+
 pub struct ShellParser<const N: usize> {
     line_buf: [u8; N],
     line_buf_end: usize,
@@ -46,10 +52,35 @@ impl<const N: usize> ShellParser<N> {
     fn parse_line(line: &str) -> Result<ShellCommand, ShellParserError> {
         let mut word_iter = line.split_whitespace();
         match word_iter.next() {
+            Some("reboot") => Ok(ShellCommand::Reboot),
             Some("calibrate") => {
                 let calibration_type = word_iter.next().ok_or(ShellParserError::InvalidCommand)?;
                 match calibration_type {
                     "imu" => Ok(ShellCommand::Calibrate(CalibrationType::ImuEasyCalibration)),
+                    _ => Err(ShellParserError::InvalidCommand),
+                }
+            }
+            Some("set") => {
+                let config_name = word_iter.next().ok_or(ShellParserError::InvalidCommand)?;
+                match config_name {
+                    "craft_name" => {
+                        let craft_name =
+                            word_iter.next().ok_or(ShellParserError::InvalidCommand)?;
+                        let mut craft_name_string = String::new();
+                        craft_name_string
+                            .write_str(craft_name)
+                            .map_err(|_| ShellParserError::InvalidCommand)?;
+                        Ok(ShellCommand::ConfigSet(ConfigSet::CraftName(
+                            craft_name_string,
+                        )))
+                    }
+                    _ => Err(ShellParserError::InvalidCommand),
+                }
+            }
+            Some("get") => {
+                let config_name = word_iter.next().ok_or(ShellParserError::InvalidCommand)?;
+                match config_name {
+                    "craft_name" => Ok(ShellCommand::ConfigGet(ConfigGet::CraftName)),
                     _ => Err(ShellParserError::InvalidCommand),
                 }
             }
@@ -59,11 +90,39 @@ impl<const N: usize> ShellParser<N> {
 }
 
 pub enum ShellCommand {
+    Reboot,
     Calibrate(CalibrationType),
+    ConfigSet(ConfigSet),
+    ConfigGet(ConfigGet),
 }
 
 pub enum CalibrationType {
     ImuEasyCalibration,
+}
+
+#[derive(Debug)]
+pub enum ConfigSet {
+    CraftName(String<16>),
+}
+
+impl From<ConfigSet> for config::UpdateItem {
+    fn from(item: ConfigSet) -> Self {
+        match item {
+            ConfigSet::CraftName(name) => config::UpdateItem::CraftName(name),
+        }
+    }
+}
+
+pub enum ConfigGet {
+    CraftName,
+}
+
+impl core::fmt::Display for ConfigSet {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            ConfigSet::CraftName(name) => write!(f, "{}", name),
+        }
+    }
 }
 
 #[derive(Debug)]

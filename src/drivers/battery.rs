@@ -1,9 +1,9 @@
 pub mod ina226;
 
 pub struct Data {
-    /// Voltage in mV
+    /// Voltage in V
     pub voltage: f64,
-    /// Current in mA
+    /// Current in A
     pub current: f64,
 }
 

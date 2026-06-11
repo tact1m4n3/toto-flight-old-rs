@@ -81,7 +81,6 @@ impl Config {
         config.motors_config[0] = MotorMixerConfig {
             trim_min_us: 1000,
             trim_max_us: 2000,
-            throttle_gain: 1.0,
             mixer_gain: Vector3::ZEROS,
         };
         config.servos_config[0] = ServoMixerConfig {
@@ -132,7 +131,6 @@ impl Default for Config {
             motors_config: [MotorMixerConfig {
                 trim_min_us: 1000,
                 trim_max_us: 2000,
-                throttle_gain: 0.0,
                 mixer_gain: Vector3::ZEROS,
             }; MAX_MOTOR_OUTPUTS],
             servos_config: [ServoMixerConfig {
@@ -170,7 +168,6 @@ pub struct RateControllerAxisConfig {
 pub struct MotorMixerConfig {
     pub trim_min_us: u16,
     pub trim_max_us: u16,
-    pub throttle_gain: f32,
     pub mixer_gain: Vector3<f32>,
 }
 

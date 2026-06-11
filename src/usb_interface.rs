@@ -9,8 +9,8 @@ use heapless::String;
 use static_cell::StaticCell;
 
 use crate::{
-    sensors,
-    usb_interface::shell_parser::{CalibrationType, ShellCommand, ShellParser},
+    config, sensors,
+    usb_interface::shell_parser::{CalibrationType, ConfigGet, ShellCommand, ShellParser},
 };
 
 mod shell_parser;
@@ -68,6 +68,8 @@ async fn shell<D: Driver<'static>>(cdc: &mut CdcAcmClass<'static, D>) -> Result<
     let mut buf = [0; 64];
     let mut parser = ShellParser::<32>::new();
 
+    let cfg = config::INITIAL.get().await;
+
     loop {
         let n = cdc.read_packet(&mut buf).await?;
         let mut remaining = &buf[..n];
@@ -79,9 +81,22 @@ async fn shell<D: Driver<'static>>(cdc: &mut CdcAcmClass<'static, D>) -> Result<
 
             match result {
                 Ok(command) => match command {
+                    ShellCommand::Reboot => {
+                        _ = write!(response, "rebooting...");
+                        crate::REBOOT.signal(());
+                    }
                     ShellCommand::Calibrate(CalibrationType::ImuEasyCalibration) => {
                         sensors::imu::start_calibration();
                         _ = write!(response, "imu calibration started")
+                    }
+                    ShellCommand::ConfigGet(config_item) => match config_item {
+                        ConfigGet::CraftName => _ = write!(response, "{}", cfg.craft_name),
+                    },
+                    ShellCommand::ConfigSet(config_item) => {
+                        match config::UpdateItem::from(config_item).commit().await {
+                            Ok(()) => _ = write!(response, "config updated successfully"),
+                            Err(_) => _ = write!(response, "error updating config"),
+                        }
                     }
                 },
                 Err(err) => _ = write!(response, "error parsing command: {err}"),

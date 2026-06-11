@@ -3,7 +3,7 @@ use ina226_tp::{
     INA226, InaAverage, InaMode, InaVbusct, InaVshct, MaskEnable, Operational, SlaveAddressing,
 };
 
-const SHUNT_RESISTANCE: f64 = 0.02;
+const SHUNT_RESISTANCE: f64 = 0.002;
 const MAX_CURRENT: f64 = 50.0;
 
 pub struct Ina226<I2C: I2c> {
@@ -30,7 +30,7 @@ impl<I2C: I2c> Ina226<I2C> {
             .set_ina_average(InaAverage::_4)
             .set_ina_masks(MaskEnable::AlertLatchEnable)
             .commit()
-            .await; // TODO: Error is ignored here by the driver.
+            .await; // NOTE: Error is ignored here by the driver.
         Ok(Self { driver: ina226 })
     }
 }
@@ -39,12 +39,8 @@ impl<I2C: I2c> super::BatterySensor for Ina226<I2C> {
     type Error = ();
 
     async fn read(&mut self) -> Result<super::Data, Self::Error> {
-        let voltage_in_mv = self.driver.read_voltage().await; // TODO: Error is ignored here by the driver.
-        let current_in_ma = self.driver.read_current().await;
-
-        Ok(super::Data {
-            voltage: voltage_in_mv,
-            current: current_in_ma,
-        })
+        let voltage = self.driver.read_voltage().await; // NOTE: Error is ignored here by the driver.
+        let current = self.driver.read_current().await;
+        Ok(super::Data { voltage, current })
     }
 }

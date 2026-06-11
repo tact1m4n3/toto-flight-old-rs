@@ -3,10 +3,15 @@
 #![allow(clippy::new_without_default)]
 #![recursion_limit = "256"]
 
+use embassy_sync::signal::Signal;
+
 pub(crate) type RawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 pub const MAX_MOTOR_OUTPUTS: usize = 2;
 pub const MAX_SERVO_OUTPUTS: usize = 5;
+
+/// Signal to trigger reboot. Logic is expected to be implemented outside of the crate.
+pub static REBOOT: Signal<RawMutex, ()> = Signal::new();
 
 #[macro_use]
 pub mod log;
