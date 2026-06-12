@@ -2072,6 +2072,7 @@ dependencies = [
  "nalgebra",
  "num-traits",
  "panic-probe",
+ "pio",
  "postcard",
  "sequential-storage",
  "serde",

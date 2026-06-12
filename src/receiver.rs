@@ -1,7 +1,7 @@
 use core::ops::RangeInclusive;
 
 use crsf::PayloadDump;
-use embassy_sync::signal::Signal;
+use embassy_sync::{signal::Signal, watch::Watch};
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
@@ -14,7 +14,7 @@ use crate::{
 };
 
 pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new([1500; 16]);
-pub static COMMAND: SyncWatch<RawMutex, Command> = SyncWatch::new(Command::Disarmed);
+pub static COMMAND: Watch<RawMutex, Command, 1> = Watch::new();
 pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats {
     uplink_link_quality: 0,
     downlink_link_quality: 0,
@@ -54,6 +54,8 @@ pub async fn task_channels_manager() {
         range: 1700..=2000,
         state: false,
     };
+
+    let command_snd = COMMAND.sender();
 
     loop {
         CHANNELS_RECEIVED.wait().await;
@@ -95,8 +97,7 @@ pub async fn task_channels_manager() {
             Command::Disarmed
         };
 
-        COMMAND.set(command);
-        control::HEARTBEAT_RECEIVER_COMMAND.signal(());
+        command_snd.send(command);
     }
 }
 
@@ -143,7 +144,7 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
 
         if result.is_err() {
             parser.reset();
-            warn!("failed to read from uart");
+            warn!("failed to read crsf data");
         }
     }
 }
@@ -169,7 +170,7 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
 
             let len = packet.dump(&mut buf).unwrap(); // this can't fail as we have a big enough buffer
             if writer.write_all(&buf[..len]).await.is_err() {
-                warn!("failed to write to uart");
+                warn!("failed to write to battery telemetry");
             }
         }
     }

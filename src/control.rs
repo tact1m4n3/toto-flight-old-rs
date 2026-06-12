@@ -10,14 +10,13 @@ use num_traits::Float;
 use crate::{
     RawMutex,
     config::{self, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
-    drivers::motor::Motor,
+    drivers::motor::{MotorOutput, ServoOutput},
     receiver, sensors,
     utils::{DurationExt, GuardedRefCell, NalgebraVec3Ext},
 };
 
 // TODO: Maybe move command stuff to another module
 
-pub static HEARTBEAT_RECEIVER_COMMAND: Signal<RawMutex, ()> = Signal::new();
 pub static AUTO_TUNE: Signal<RawMutex, bool> = Signal::new();
 
 static SHARED_STATE: Mutex<RawMutex, RefCell<SharedState>> =
@@ -86,9 +85,14 @@ pub enum Command {
 }
 
 #[derive(Clone, Copy)]
-pub struct Outputs<const MOTORS: usize, const SERVOS: usize, M: Motor, S: Motor> {
-    pub motors: [M; MOTORS],
-    pub servos: [S; SERVOS],
+pub struct Outputs<
+    const MOTORS: usize,
+    const SERVOS: usize,
+    M: MotorOutput<MOTORS>,
+    S: ServoOutput<SERVOS>,
+> {
+    pub motors: M,
+    pub servos: S,
 }
 
 pub async fn task_command_guardian() {
@@ -96,6 +100,8 @@ pub async fn task_command_guardian() {
     const FAILSAFE_MONITOR_PERIOD: Duration = Duration::from_millis(300);
     const FAILSAFE_RECOVERY_MIN_COMMAND_RATE: Duration = Duration::from_hz(10);
     const FAILSAFE_RECOVERY_PERIOD: Duration = Duration::from_millis(200);
+
+    let mut rc_command_rcv = receiver::COMMAND.receiver().unwrap();
 
     'failsafe_start: loop {
         info!("we are in failsafe");
@@ -113,7 +119,7 @@ pub async fn task_command_guardian() {
         loop {
             match embassy_time::with_timeout(
                 FAILSAFE_RECOVERY_MIN_COMMAND_RATE,
-                HEARTBEAT_RECEIVER_COMMAND.wait(),
+                rc_command_rcv.changed(),
             )
             .await
             {
@@ -138,12 +144,9 @@ pub async fn task_command_guardian() {
 
         loop {
             // Receive command loop. No failsafe in sight
-            while let Ok(()) =
-                embassy_time::with_timeout(VALID_COMMAND_RATE, HEARTBEAT_RECEIVER_COMMAND.wait())
-                    .await
+            while let Ok(command) =
+                embassy_time::with_timeout(VALID_COMMAND_RATE, rc_command_rcv.changed()).await
             {
-                let command = receiver::COMMAND.get();
-
                 SHARED_STATE.lock(|shared_state| {
                     let mut shared_state = shared_state.borrow_mut();
 
@@ -182,12 +185,9 @@ pub async fn task_command_guardian() {
             info!("failsafe detect stage 1");
 
             // Maybe we are in failsafe, do we receive any more packets in this recovery period?
-            if embassy_time::with_timeout(
-                FAILSAFE_MONITOR_PERIOD,
-                HEARTBEAT_RECEIVER_COMMAND.wait(),
-            )
-            .await
-            .is_err()
+            if embassy_time::with_timeout(FAILSAFE_MONITOR_PERIOD, rc_command_rcv.changed())
+                .await
+                .is_err()
             {
                 // No command received in the failsafe monitor period, so we enter failsafe again
                 continue 'failsafe_start;
@@ -203,7 +203,12 @@ struct InnerLoopState<const MOTORS: usize, const SERVOS: usize> {
     servo_mixer_config: [ServoMixerConfig; SERVOS],
 }
 
-pub async fn task_inner_loop<const MOTORS: usize, const SERVOS: usize, M: Motor, S: Motor>(
+pub async fn task_inner_loop<
+    const MOTORS: usize,
+    const SERVOS: usize,
+    M: MotorOutput<MOTORS>,
+    S: ServoOutput<SERVOS>,
+>(
     mut outputs: Outputs<MOTORS, SERVOS, M, S>,
 ) {
     let cfg = config::INITIAL.get().await;
@@ -496,13 +501,12 @@ struct ActuatorOutput<const MOTORS: usize, const SERVOS: usize> {
 }
 
 impl<const MOTORS: usize, const SERVOS: usize> ActuatorOutput<MOTORS, SERVOS> {
-    fn apply<M: Motor, S: Motor>(self, outputs: &mut Outputs<MOTORS, SERVOS, M, S>) {
-        for (motor, value) in outputs.motors.iter_mut().zip(self.motors) {
-            motor.write(value);
-        }
-        for (servo, value) in outputs.servos.iter_mut().zip(self.servos) {
-            servo.write(value);
-        }
+    fn apply<M: MotorOutput<MOTORS>, S: ServoOutput<SERVOS>>(
+        self,
+        outputs: &mut Outputs<MOTORS, SERVOS, M, S>,
+    ) {
+        outputs.motors.write(&self.motors);
+        outputs.servos.write(&self.servos);
     }
 }
 

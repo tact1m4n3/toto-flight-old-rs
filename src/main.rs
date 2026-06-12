@@ -28,10 +28,14 @@ use panic_probe as _;
 #[macro_use]
 extern crate toto_flight;
 
-use toto_flight::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b};
+use toto_flight::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b, motor::dshot_pio};
 
-type Outputs =
-    toto_flight::control::Outputs<1, 2, pwm::PwmOutput<'static>, pwm::PwmOutput<'static>>;
+type Outputs = toto_flight::control::Outputs<
+    1,
+    2,
+    dshot_pio::DshotPio<'static, PIO0>,
+    [pwm::PwmOutput<'static>; 2],
+>;
 
 type I2cBus = i2c::I2c<'static, I2C0, i2c::Async>;
 type SharedI2cBus = AsyncMutex<CriticalSectionRawMutex, I2cBus>;
@@ -55,17 +59,19 @@ type AsyncFlash =
 
 type UsbDriver = usb::Driver<'static, USB>;
 
-type PioWs2812Driver = ws2812::PioWs2812<'static, PIO0, 0, ws2812::Grb>;
+type PioWs2812Driver = ws2812::PioWs2812<'static, PIO2, 0, ws2812::Grb>;
 
 assign_resources! {
-    motor_outputs: MotorOutputsPeripherals {
-        slice_esc: PWM_SLICE3,
-        slice_left_elevon: PWM_SLICE5,
-        slice_right_elevon: PWM_SLICE7,
-        esc_signal: PIN_6,
-        esc_telemetry: PIN_16,
-        left_elevon: PIN_11,
-        right_elevon: PIN_15,
+    esc: EscOutputPeripherals {
+        pio: PIO0,
+        signal_pin: PIN_6,
+        telemetry_pin: PIN_16,
+    },
+    servos: ServoOutputsPeripherals {
+        left_elevon_slice: PWM_SLICE5,
+        right_elevon_slice: PWM_SLICE7,
+        left_elevon_pin: PIN_11,
+        right_elevon_pin: PIN_15,
     },
     imu: ImuPeripherals {
         spi: SPI1,
@@ -107,7 +113,7 @@ assign_resources! {
     },
     led: LedPeripherals {
         pin: PIN_46,
-        pio: PIO0,
+        pio: PIO2,
         dma: DMA_CH2,
     },
 }
@@ -125,6 +131,7 @@ embassy_rp::bind_interrupts!(pub struct Irqs {
     UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
+    PIO2_IRQ_0 => pio::InterruptHandler<PIO2>;
 });
 
 static REALTIME_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
@@ -150,16 +157,19 @@ async fn main(thread_spawner: Spawner) -> ! {
     let r = split_resources!(p);
 
     // init interrupts
-    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P0); // realtime executor
-    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P2); // low prio executor
+    interrupt::SWI_IRQ_0.set_priority(interrupt::Priority::P1); // realtime executor
+    interrupt::SWI_IRQ_1.set_priority(interrupt::Priority::P3); // low prio executor
 
-    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P1);
-    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P1);
-    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P1);
-    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P1);
-    interrupt::PIO0_IRQ_0.set_priority(interrupt::Priority::P1);
+    // used by the inner control loop
+    interrupt::PIO0_IRQ_0.set_priority(interrupt::Priority::P0);
 
-    let outputs = {
+    interrupt::I2C0_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::UART0_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::UART1_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::PIO2_IRQ_0.set_priority(interrupt::Priority::P2);
+
+    let servo_outputs = {
         // Make pwm counter increment once every microsecond
         let pwm_divider = embassy_rp::clocks::clk_sys_freq() / 1_000_000;
         // The frequency of the pwm signal is 50Hz.
@@ -169,18 +179,9 @@ async fn main(thread_spawner: Spawner) -> ! {
         config.top = pwm_top;
         config.divider = FixedU16::from_num(pwm_divider);
 
-        let (Some(esc_pwm), None) = pwm::Pwm::new_output_a(
-            r.motor_outputs.slice_esc,
-            r.motor_outputs.esc_signal,
-            config.clone(),
-        )
-        .split() else {
-            unreachable!()
-        };
-
         let (None, Some(left_elevon_pwm)) = pwm::Pwm::new_output_b(
-            r.motor_outputs.slice_left_elevon,
-            r.motor_outputs.left_elevon,
+            r.servos.left_elevon_slice,
+            r.servos.left_elevon_pin,
             config.clone(),
         )
         .split() else {
@@ -188,18 +189,24 @@ async fn main(thread_spawner: Spawner) -> ! {
         };
 
         let (None, Some(right_elevon_pwm)) = pwm::Pwm::new_output_b(
-            r.motor_outputs.slice_right_elevon,
-            r.motor_outputs.right_elevon,
+            r.servos.right_elevon_slice,
+            r.servos.right_elevon_pin,
             config.clone(),
         )
         .split() else {
             unreachable!()
         };
 
-        toto_flight::control::Outputs {
-            motors: [esc_pwm],
-            servos: [left_elevon_pwm, right_elevon_pwm],
-        }
+        [left_elevon_pwm, right_elevon_pwm]
+    };
+    let outputs = Outputs {
+        motors: dshot_pio::DshotPio::new(
+            r.esc.pio,
+            Irqs,
+            r.esc.signal_pin,
+            dshot_pio::Speed::Dshot150,
+        ),
+        servos: servo_outputs,
     };
 
     let imu_spi_device = {

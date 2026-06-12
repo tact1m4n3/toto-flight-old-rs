@@ -18,7 +18,7 @@ const LOG_FILE_EXTENSION: &str = "BIN";
 const MAX_FILE_NAME_LEN: usize = LOG_FILE_PREFIX.len() + 3 + ".".len() + LOG_FILE_EXTENSION.len();
 const _: () = assert!(MAX_FILE_NAME_LEN <= 11);
 
-const LOG_RATE_PERIOD: Duration = Duration::from_hz(500);
+const LOG_RATE_PERIOD: Duration = Duration::from_hz(10);
 const STOP_RECORDING_DELAY: Duration = Duration::from_secs(2);
 
 pub const MAX_DIRS: usize = 1;
