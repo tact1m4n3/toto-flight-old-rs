@@ -1,4 +1,14 @@
 use embedded_io_async::BufRead;
+use uom::{
+    ConstZero,
+    si::{
+        angle::degree,
+        f32::{Angle as AngleF32, Length, Velocity},
+        f64::Angle as AngleF64,
+        length::meter,
+        velocity::meter_per_second,
+    },
+};
 
 use crate::RawMutex;
 use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRef};
@@ -6,17 +16,25 @@ use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRe
 use crate::utils::{SyncWatch, read_process_and_consume};
 
 pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
-    latitude: 0.0,
-    longitude: 0.0,
-    altitude: 0.0,
-    h_acc: f32::INFINITY,
-    v_acc: f32::INFINITY,
-    speed: 0.0,
-    heading: 0.0,
+    latitude: AngleF64::ZERO,
+    longitude: AngleF64::ZERO,
+    altitude: Length::ZERO,
+    h_acc: Length {
+        dimension: core::marker::PhantomData,
+        units: core::marker::PhantomData,
+        value: f32::INFINITY,
+    },
+    v_acc: Length {
+        dimension: core::marker::PhantomData,
+        units: core::marker::PhantomData,
+        value: f32::INFINITY,
+    },
+    velocity_over_ground: Velocity::ZERO,
+    heading: AngleF32::ZERO,
     num_sat: 0,
     hdop: f32::INFINITY,
     fix_type: FixType::Undefined,
-    vertical_velocity: 0.0,
+    vertical_velocity: Velocity::ZERO,
 });
 
 pub async fn task<R: BufRead>(mut reader: R) {
@@ -30,17 +48,21 @@ pub async fn task<R: BufRead>(mut reader: R) {
 
                     if let PacketRef::NavPvt(pvt) = packet {
                         let data = Data {
-                            latitude: pvt.latitude(),
-                            longitude: pvt.longitude(),
-                            altitude: pvt.height_msl() as f32,
-                            h_acc: pvt.horizontal_accuracy() as f32,
-                            v_acc: pvt.vertical_accuracy() as f32,
-                            speed: pvt.ground_speed_2d() as f32,
-                            heading: pvt.heading_motion() as f32,
+                            latitude: AngleF64::new::<degree>(pvt.latitude()),
+                            longitude: AngleF64::new::<degree>(pvt.longitude()),
+                            altitude: Length::new::<meter>(pvt.height_msl() as f32),
+                            h_acc: Length::new::<meter>(pvt.horizontal_accuracy() as f32),
+                            v_acc: Length::new::<meter>(pvt.vertical_accuracy() as f32),
+                            velocity_over_ground: Velocity::new::<meter_per_second>(
+                                pvt.ground_speed_2d() as f32,
+                            ),
+                            heading: AngleF32::new::<degree>(pvt.heading_motion() as f32),
                             num_sat: pvt.num_satellites(),
                             hdop: pvt.pdop() as f32,
                             fix_type: pvt.fix_type().into(),
-                            vertical_velocity: pvt.vel_down() as f32,
+                            vertical_velocity: Velocity::new::<meter_per_second>(
+                                pvt.vel_down() as f32
+                            ),
                         };
 
                         DATA.set(data);
@@ -61,19 +83,19 @@ pub async fn task<R: BufRead>(mut reader: R) {
 #[derive(Clone, Copy, Debug)]
 pub struct Data {
     /// Latitude in degrees (positive = North)
-    pub latitude: f64,
+    pub latitude: AngleF64,
     /// Longitude in degrees (positive = East)
-    pub longitude: f64,
+    pub longitude: AngleF64,
     /// Altitude above ellipsoid in meters
-    pub altitude: f32,
+    pub altitude: Length,
     /// Horizontal accuracy estimate in meters
-    pub h_acc: f32,
+    pub h_acc: Length,
     /// Vertical accuracy estimate in meters
-    pub v_acc: f32,
+    pub v_acc: Length,
     /// Speed over ground in m/s
-    pub speed: f32,
+    pub velocity_over_ground: Velocity,
     /// Course over ground in degrees (0-360)
-    pub heading: f32,
+    pub heading: AngleF32,
     /// Number of satellites in use
     pub num_sat: u8,
     /// Horizontal dilution of precision
@@ -81,7 +103,7 @@ pub struct Data {
     /// Fix type
     pub fix_type: FixType,
     /// Vertical velocity (speed downward) in m/s
-    pub vertical_velocity: f32,
+    pub vertical_velocity: Velocity,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -5,9 +5,12 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal::spi::SpiDevice;
 use embedded_sdmmc::{RawDirectory, RawFile, SdCard, VolumeManager};
 use heapless::String;
+use uom::si::angle::degree;
 use uom::si::electric_charge::milliampere_hour;
 use uom::si::electric_current::ampere;
 use uom::si::electric_potential::volt;
+use uom::si::length::meter;
+use uom::si::velocity::meter_per_second;
 
 use crate::{RawMutex, sensors};
 use crate::{control, receiver, utils::SyncWatchReader};
@@ -178,12 +181,12 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
                 gps.fix_type as u8,
                 gps.num_sat,
                 gps.hdop,
-                gps.latitude,
-                gps.longitude,
-                gps.altitude,
-                gps.speed,
-                gps.heading,
-                gps.vertical_velocity,
+                gps.latitude.get::<degree>(),
+                gps.longitude.get::<degree>(),
+                gps.altitude.get::<meter>(),
+                gps.velocity_over_ground.get::<meter_per_second>(),
+                gps.heading.get::<degree>(),
+                gps.vertical_velocity.get::<meter_per_second>(),
             )?;
         }
 
