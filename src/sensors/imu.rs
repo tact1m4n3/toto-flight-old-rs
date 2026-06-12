@@ -42,12 +42,11 @@ pub async fn task_read<I: ImuSensor>(mut imu: I) {
 
         IMU_RAW_SAMPLE.signal(data);
 
-        let mut gyro = cfg.board_orientation * data.gyro - cfg.imu_calibration.gyro_bias;
+        let gyro = cfg.board_orientation * data.gyro - cfg.imu_calibration.gyro_bias;
         let mut accel = cfg.board_orientation
             * data.accel.component_mul(&cfg.imu_calibration.accel_scale)
             - cfg.imu_calibration.accel_bias;
 
-        gyro *= core::f32::consts::PI / 180.0; // to rad/s from dps
         accel *= 9.80665; // to m/s^2 from g
 
         DATA.set(Data { gyro, accel });

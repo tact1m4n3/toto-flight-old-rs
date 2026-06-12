@@ -1,10 +1,10 @@
+use uom::si::f32::{ElectricCurrent, ElectricPotential};
+
 pub mod ina226;
 
 pub struct Data {
-    /// Voltage in V
-    pub voltage: f64,
-    /// Current in A
-    pub current: f64,
+    pub voltage: ElectricPotential,
+    pub current: ElectricCurrent,
 }
 
 pub trait BatterySensor {

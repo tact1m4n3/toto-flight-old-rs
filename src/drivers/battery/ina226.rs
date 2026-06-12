@@ -2,9 +2,17 @@ use embedded_hal_async::i2c::I2c;
 use ina226_tp::{
     INA226, InaAverage, InaMode, InaVbusct, InaVshct, MaskEnable, Operational, SlaveAddressing,
 };
+use uom::si::{
+    electric_current::ampere,
+    electric_potential::volt,
+    f32::{ElectricCurrent, ElectricPotential},
+};
 
 const SHUNT_RESISTANCE: f64 = 0.002;
 const MAX_CURRENT: f64 = 50.0;
+
+// TODO: this driver currently does all floating point calculations in f64. use
+// no-float feature and do the math manually using f32
 
 pub struct Ina226<I2C: I2c> {
     driver: INA226<I2C, Operational>,
@@ -41,6 +49,9 @@ impl<I2C: I2c> super::BatterySensor for Ina226<I2C> {
     async fn read(&mut self) -> Result<super::Data, Self::Error> {
         let voltage = self.driver.read_voltage().await; // NOTE: Error is ignored here by the driver.
         let current = self.driver.read_current().await;
-        Ok(super::Data { voltage, current })
+        Ok(super::Data {
+            voltage: ElectricPotential::new::<volt>(voltage as f32),
+            current: ElectricCurrent::new::<ampere>(current as f32),
+        })
     }
 }

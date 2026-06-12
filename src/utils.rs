@@ -8,6 +8,7 @@ use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
 use embassy_time::Duration;
 use embedded_io_async::BufRead;
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
+use uom::si::{f32::Time, time::microsecond};
 
 pub const US_TO_ZERO_ONE: Mapping = Mapping {
     from: 1000.0..2000.0,
@@ -72,17 +73,16 @@ impl NalgebraMatrix3Ext for Matrix3<f32> {
 }
 
 pub trait DurationExt {
+    fn dt(&self) -> Time;
     fn dt_f32(&self) -> f32;
-    fn dt_f64(&self) -> f64;
 }
 
 impl DurationExt for Duration {
+    fn dt(&self) -> Time {
+        Time::new::<microsecond>(self.as_micros() as f32)
+    }
     fn dt_f32(&self) -> f32 {
         self.as_micros() as f32 / 1_000_000.0
-    }
-
-    fn dt_f64(&self) -> f64 {
-        self.as_micros() as f64 / 1_000_000.0
     }
 }
 

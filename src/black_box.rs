@@ -5,6 +5,9 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal::spi::SpiDevice;
 use embedded_sdmmc::{RawDirectory, RawFile, SdCard, VolumeManager};
 use heapless::String;
+use uom::si::electric_charge::milliampere_hour;
+use uom::si::electric_current::ampere;
+use uom::si::electric_potential::volt;
 
 use crate::{RawMutex, sensors};
 use crate::{control, receiver, utils::SyncWatchReader};
@@ -188,9 +191,9 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
             log::write_bat(
                 &mut file,
                 timestamp_us,
-                battery.voltage as f32,
-                battery.current as f32,
-                battery.capacity_used as f32,
+                battery.voltage.get::<volt>(),
+                battery.current.get::<ampere>(),
+                battery.capacity_used.get::<milliampere_hour>(),
             )?;
         }
 

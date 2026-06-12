@@ -5,6 +5,9 @@ use embassy_sync::{signal::Signal, watch::Watch};
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
+use uom::si::{
+    electric_charge::milliampere_hour, electric_current::centiampere, electric_potential::centivolt,
+};
 
 use crate::{
     RawMutex,
@@ -162,10 +165,10 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
             let battery = sensors::battery::DATA.get();
 
             let packet = crsf::BatterySensor {
-                voltage: (battery.voltage * 10.0) as i16,
-                current: (battery.current * 10.0) as i16,
-                capacity_used: battery.capacity_used as u32, // already in mAh
-                remaining: 0,                                // we don't have this info
+                voltage: battery.voltage.get::<centivolt>() as i16,
+                current: battery.current.get::<centiampere>() as i16,
+                capacity_used: battery.capacity_used.get::<milliampere_hour>() as u32, // already in mAh
+                remaining: 0, // we don't have this info
             };
 
             let len = packet.dump(&mut buf).unwrap(); // this can't fail as we have a big enough buffer

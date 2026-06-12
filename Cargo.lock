@@ -1822,6 +1822,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sguaba"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c68e5853ce1ef5aca3959f2369da9bc84a0582680792cfc7baf9bef51a16c0a"
+dependencies = [
+ "libm",
+ "nalgebra",
+ "typenum",
+ "uom",
+]
+
+[[package]]
 name = "sha2-const-stable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2076,9 +2088,11 @@ dependencies = [
  "postcard",
  "sequential-storage",
  "serde",
+ "sguaba",
  "smart-leds",
  "static_cell",
  "ublox",
+ "uom",
  "zerocopy",
 ]
 
@@ -2195,6 +2209,16 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "uom"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a739f83872836c82a4f2527d4e54b37007b3de68cafe7edde95fd695968bf4b9"
+dependencies = [
+ "num-traits",
+ "typenum",
+]
 
 [[package]]
 name = "usb-device"

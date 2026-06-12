@@ -22,6 +22,7 @@ pub mod control;
 #[cfg(feature = "cpu-usage")]
 pub mod cpu_usage;
 pub mod drivers;
+pub mod math;
 pub mod receiver;
 pub mod sensors;
 pub mod status_led;

@@ -1,4 +1,8 @@
 use embassy_time::{Duration, Ticker};
+use uom::{
+    ConstZero,
+    si::f32::{ElectricCharge, ElectricCurrent, ElectricPotential},
+};
 
 use crate::{
     RawMutex,
@@ -7,16 +11,16 @@ use crate::{
 };
 
 pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
-    voltage: 0.0,
-    current: 0.0,
-    capacity_used: 0.0,
+    voltage: ElectricPotential::ZERO,
+    current: ElectricCurrent::ZERO,
+    capacity_used: ElectricCharge::ZERO,
 });
 
 pub async fn task<B: BatterySensor>(mut sensor: B) {
     const PERIOD: Duration = Duration::from_hz(10);
 
-    let mut prev_current: f64 = 0.0;
-    let mut capacity_used: f64 = 0.0;
+    let mut prev_current = ElectricCurrent::ZERO;
+    let mut capacity_used = ElectricCharge::ZERO;
 
     let mut ticker = Ticker::every(PERIOD);
     loop {
@@ -28,7 +32,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
         };
 
         // trapezoidal integration
-        capacity_used += data.current.midpoint(prev_current) * 1000.0 * (PERIOD.dt_f64() / 3600.0);
+        capacity_used += (prev_current + data.current) / 2.0 * PERIOD.dt();
         prev_current = data.current;
 
         let data = Data {
@@ -42,10 +46,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
 
 #[derive(Clone, Copy)]
 pub struct Data {
-    /// in V
-    pub voltage: f64,
-    /// in A
-    pub current: f64,
-    /// in mAh
-    pub capacity_used: f64,
+    pub voltage: ElectricPotential,
+    pub current: ElectricCurrent,
+    pub capacity_used: ElectricCharge,
 }
