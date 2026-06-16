@@ -1,10 +1,12 @@
 use ahrs::Ahrs;
 use embassy_time::{Duration, Ticker};
 use nalgebra::{UnitQuaternion, Vector3};
+use uom::si::{acceleration::standard_gravity, angular_velocity::radian_per_second};
 
 use crate::{
     RawMutex,
-    utils::{DurationExt, NalgebraQuatExt, SyncWatch},
+    math::QuaternionExt,
+    utils::{DurationExt, SyncWatch},
 };
 
 pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> =
@@ -20,8 +22,8 @@ pub async fn task() {
         ticker.next().await;
 
         let imu = super::imu::DATA.get();
-        let gyro = imu.gyro;
-        let accel = imu.accel;
+        let gyro = imu.gyro.get::<radian_per_second>();
+        let accel = imu.accel.get::<standard_gravity>();
         let gyro_nwu = Vector3::new(gyro.x, -gyro.y, -gyro.z);
         let accel_nwu = Vector3::new(accel.x, -accel.y, -accel.z);
 

@@ -7,7 +7,6 @@ use core::{
 use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
 use embassy_time::Duration;
 use embedded_io_async::BufRead;
-use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 use uom::si::{f32::Time, time::microsecond};
 
 pub const US_TO_ZERO_ONE: Mapping = Mapping {
@@ -43,42 +42,13 @@ impl Mapping {
     }
 }
 
-pub trait NalgebraVec3Ext {
-    const ZEROS: Self;
-    const ONES: Self;
-}
-
-impl NalgebraVec3Ext for Vector3<f32> {
-    const ZEROS: Self = Vector3::new(0.0, 0.0, 0.0);
-    const ONES: Self = Vector3::new(1.0, 1.0, 1.0);
-}
-
-pub trait NalgebraQuatExt {
-    const IDENTITY: Self;
-}
-
-impl NalgebraQuatExt for UnitQuaternion<f32> {
-    const IDENTITY: Self = UnitQuaternion::new_unchecked(Quaternion::new(1.0, 0.0, 0.0, 0.0));
-}
-
-pub trait NalgebraMatrix3Ext {
-    const IDENTITY: Self;
-}
-
-impl NalgebraMatrix3Ext for Matrix3<f32> {
-    #[rustfmt::skip]
-    const IDENTITY: Self = Matrix3::new(1.0, 0.0, 0.0,
-                                        0.0, 1.0, 0.0,
-                                        0.0, 0.0, 1.0);
-}
-
 pub trait DurationExt {
-    fn dt(&self) -> Time;
+    fn time_f32(&self) -> Time;
     fn dt_f32(&self) -> f32;
 }
 
 impl DurationExt for Duration {
-    fn dt(&self) -> Time {
+    fn time_f32(&self) -> Time {
         Time::new::<microsecond>(self.as_micros() as f32)
     }
     fn dt_f32(&self) -> f32 {

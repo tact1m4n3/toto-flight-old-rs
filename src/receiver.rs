@@ -6,7 +6,7 @@ use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
 use uom::si::{
-    electric_charge::milliampere_hour, electric_current::centiampere, electric_potential::centivolt,
+    electric_charge::milliampere_hour, electric_current::deciampere, electric_potential::decivolt,
 };
 
 use crate::{
@@ -165,8 +165,8 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
             let battery = sensors::battery::DATA.get();
 
             let packet = crsf::BatterySensor {
-                voltage: battery.voltage.get::<centivolt>() as i16,
-                current: battery.current.get::<centiampere>() as i16,
+                voltage: battery.voltage.get::<decivolt>() as i16,
+                current: battery.current.get::<deciampere>() as i16,
                 capacity_used: battery.capacity_used.get::<milliampere_hour>() as u32, // already in mAh
                 remaining: 0, // we don't have this info
             };

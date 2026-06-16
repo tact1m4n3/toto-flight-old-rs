@@ -6,13 +6,15 @@ use embassy_time::{Duration, Instant, Ticker};
 use futures::join;
 use nalgebra::{UnitQuaternion, Vector3};
 use num_traits::Float;
+use uom::si::angular_velocity::{degree_per_second, radian_per_second};
 
 use crate::{
     RawMutex,
     config::{self, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::{MotorOutput, ServoOutput},
+    math::{AngularVelocity3D, Vector3Ext},
     receiver, sensors,
-    utils::{DurationExt, GuardedRefCell, NalgebraVec3Ext},
+    utils::{DurationExt, GuardedRefCell},
 };
 
 // TODO: Maybe move command stuff to another module
@@ -252,10 +254,10 @@ pub async fn task_inner_loop<
                         };
 
                         maybe_rate_control.map(|rate_control| {
-                            let gyro = sensors::imu::DATA.get().gyro;
+                            let sensors::imu::Data { gyro, .. } = sensors::imu::DATA.get();
                             rate_control.target_manual(
                                 &mut state.rate_controller,
-                                &gyro,
+                                gyro.get::<degree_per_second>(),
                                 PERIOD.dt_f32(),
                             )
                         })
@@ -416,26 +418,28 @@ impl AngleControl {
         let target_up = UnitQuaternion::from_euler_angles(self.roll_angle, self.pitch_angle, 0.0)
             .inverse_transform_vector(&world_up);
 
-        let angle_error = {
+        let correction_rate = {
             let cross = body_up.cross(&target_up);
             let dot = body_up.dot(&target_up).clamp(-1.0, 1.0);
 
             let angle = dot.atan2(cross.norm());
 
-            cross
+            let angle_error_radians = cross
                 .try_normalize(1e-6)
                 .map_or(Vector3::zeros(), |cross_normalized| {
                     cross_normalized * angle
-                })
+                });
+
+            AngularVelocity3D::new::<radian_per_second>(
+                angle_error_radians.x * ANGLE_ROLL_KP,
+                angle_error_radians.y * ANGLE_PITCH_KP,
+                0.0,
+            )
         };
 
         RateControl {
             throttle: self.throttle,
-            rate: Vector3::new(
-                angle_error.x * ANGLE_ROLL_KP,
-                angle_error.y * ANGLE_PITCH_KP,
-                0.0,
-            ),
+            rate: correction_rate.get::<degree_per_second>(),
         }
     }
 }
@@ -443,6 +447,7 @@ impl AngleControl {
 #[derive(Clone)]
 struct RateControl {
     throttle: u16,
+    /// Target rate in dps
     rate: Vector3<f32>,
 }
 
@@ -450,13 +455,13 @@ impl RateControl {
     fn target_manual(
         self,
         rate_controller: &mut RateController,
-        gyro: &Vector3<f32>,
+        gyro: Vector3<f32>,
         dt: f32,
     ) -> ManualControl {
         let Self { throttle, rate } = self;
         ManualControl {
             throttle,
-            throw: rate_controller.update(&rate, gyro, dt),
+            throw: rate_controller.update(rate, gyro, dt),
         }
     }
 }
@@ -555,8 +560,8 @@ impl RateController {
 
     fn update(
         &mut self,
-        target_rate: &Vector3<f32>,
-        current_rate: &Vector3<f32>,
+        target_rate: Vector3<f32>,
+        current_rate: Vector3<f32>,
         dt: f32,
     ) -> Vector3<f32> {
         Vector3::new(

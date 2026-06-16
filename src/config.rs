@@ -10,11 +10,15 @@ use sequential_storage::{
 };
 
 pub use sequential_storage::Error;
+use uom::{
+    ConstZero,
+    si::{angle::degree, f32::Angle},
+};
 
 use crate::{
     MAX_MOTOR_OUTPUTS, MAX_SERVO_OUTPUTS, RawMutex,
     control::ArmBlocker,
-    utils::{NalgebraMatrix3Ext, NalgebraVec3Ext},
+    math::{Acceleration3D, AngularVelocity3D, Vector3Ext},
 };
 
 const BUFFER_SIZE: usize = 128;
@@ -33,7 +37,7 @@ pub enum UpdateError {
 #[derive(Clone)]
 pub enum UpdateItem {
     CraftName(String<16>),
-    BoardForwardAngle(f32),
+    BoardForwardAngle(Angle),
     ImuCalibration(ImuCalibration),
     BoardOrientation(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
@@ -60,7 +64,7 @@ impl UpdateItem {
 
 pub struct Config {
     pub craft_name: String<16>,
-    pub board_forward_angle: f32,
+    pub board_forward_angle: Angle,
     pub imu_calibration: ImuCalibration,
     pub board_orientation: Matrix3<f32>,
     pub rate_controller_config: RateControllerConfig,
@@ -76,7 +80,7 @@ impl Config {
         config.craft_name.clear();
         _ = config.craft_name.push_str("Toto Plane");
 
-        config.board_forward_angle = 90.0f32.to_radians();
+        config.board_forward_angle = Angle::new::<degree>(90.0f32);
 
         config.motors_config[0] = MotorMixerConfig {
             trim_min_us: 1000,
@@ -104,13 +108,13 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             craft_name: String::new(),
-            board_forward_angle: 0.0,
+            board_forward_angle: Angle::ZERO,
             imu_calibration: ImuCalibration {
-                gyro_bias: Vector3::ZEROS,
-                accel_bias: Vector3::ZEROS,
-                accel_scale: Vector3::ONES,
+                gyro_bias: AngularVelocity3D::ZEROS,
+                accel_bias: Acceleration3D::ZEROS,
+                accel_scale: Vector3::new(1.0, 1.0, 1.0),
             },
-            board_orientation: Matrix3::IDENTITY,
+            board_orientation: Matrix3::identity(),
             rate_controller_config: RateControllerConfig {
                 roll: RateControllerAxisConfig {
                     kp: 7.0,
@@ -131,13 +135,13 @@ impl Default for Config {
             motors_config: [MotorMixerConfig {
                 trim_min_us: 1000,
                 trim_max_us: 2000,
-                mixer_gain: Vector3::ZEROS,
+                mixer_gain: Vector3::zeros(),
             }; MAX_MOTOR_OUTPUTS],
             servos_config: [ServoMixerConfig {
                 mid_point_us: 1500,
                 trim_min_us: 1000,
                 trim_max_us: 2000,
-                mixer_gain: Vector3::ZEROS,
+                mixer_gain: Vector3::zeros(),
             }; MAX_SERVO_OUTPUTS],
         }
     }
@@ -145,8 +149,8 @@ impl Default for Config {
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImuCalibration {
-    pub gyro_bias: Vector3<f32>,
-    pub accel_bias: Vector3<f32>,
+    pub gyro_bias: AngularVelocity3D,
+    pub accel_bias: Acceleration3D,
     pub accel_scale: Vector3<f32>,
 }
 
@@ -375,7 +379,7 @@ impl Key for StorageKey {
 #[derive(serde::Serialize, serde::Deserialize)]
 enum StorageValue {
     CraftName(String<16>),
-    BoardForwardAngle(f32),
+    BoardForwardAngle(Angle),
     ImuCalibration(ImuCalibration),
     BoardOrientation(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),

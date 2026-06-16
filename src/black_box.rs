@@ -5,7 +5,9 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal::spi::SpiDevice;
 use embedded_sdmmc::{RawDirectory, RawFile, SdCard, VolumeManager};
 use heapless::String;
+use uom::si::acceleration::meter_per_second_squared;
 use uom::si::angle::degree;
+use uom::si::angular_velocity::radian_per_second;
 use uom::si::electric_charge::milliampere_hour;
 use uom::si::electric_current::ampere;
 use uom::si::electric_potential::volt;
@@ -170,8 +172,12 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
         let timestamp_us = now.as_micros();
 
         if let Some(imu) = self.imu_watcher.get_if_changed() {
-            log::write_gyro(&mut file, timestamp_us, imu.gyro)?;
-            log::write_accel(&mut file, timestamp_us, imu.accel)?;
+            log::write_gyro(&mut file, timestamp_us, imu.gyro.get::<radian_per_second>())?;
+            log::write_accel(
+                &mut file,
+                timestamp_us,
+                imu.accel.get::<meter_per_second_squared>(),
+            )?;
         }
 
         if let Some(gps) = self.gps_watcher.get_if_changed() {

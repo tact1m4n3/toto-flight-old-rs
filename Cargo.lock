@@ -1357,6 +1357,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+ "serde",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1383,6 +1394,7 @@ checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -1822,18 +1834,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sguaba"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c68e5853ce1ef5aca3959f2369da9bc84a0582680792cfc7baf9bef51a16c0a"
-dependencies = [
- "libm",
- "nalgebra",
- "typenum",
- "uom",
-]
-
-[[package]]
 name = "sha2-const-stable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2088,7 +2088,6 @@ dependencies = [
  "postcard",
  "sequential-storage",
  "serde",
- "sguaba",
  "smart-leds",
  "static_cell",
  "ublox",
@@ -2216,7 +2215,11 @@ version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a739f83872836c82a4f2527d4e54b37007b3de68cafe7edde95fd695968bf4b9"
 dependencies = [
+ "num-bigint",
+ "num-complex",
+ "num-rational",
  "num-traits",
+ "serde_core",
  "typenum",
 ]
 

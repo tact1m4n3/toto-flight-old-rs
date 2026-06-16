@@ -32,7 +32,7 @@ pub async fn task<B: BatterySensor>(mut sensor: B) {
         };
 
         // trapezoidal integration
-        capacity_used += (prev_current + data.current) / 2.0 * PERIOD.dt();
+        capacity_used += (prev_current + data.current) / 2.0 * PERIOD.time_f32();
         prev_current = data.current;
 
         let data = Data {

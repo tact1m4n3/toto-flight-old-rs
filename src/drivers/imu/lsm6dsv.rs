@@ -8,7 +8,9 @@
 // TODO: add support for multiple data rates
 
 use embedded_hal_async::{delay::DelayNs, spi::SpiDevice};
-use nalgebra::Vector3;
+use uom::si::{acceleration::standard_gravity, angular_velocity::degree_per_second};
+
+use crate::math::{Acceleration3D, AngularVelocity3D};
 
 pub type Lsm6dsv<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
 pub type Lsm6dsv16x<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
@@ -155,13 +157,15 @@ where
             )
         };
 
+        let (ax, ay, az) = (ax, -ay, -az);
+
         Ok(super::Data {
-            gyro: Vector3::new(
+            gyro: AngularVelocity3D::new::<degree_per_second>(
                 f32::from(gx) * GYRO_SCALE_DPS,
                 f32::from(gy) * GYRO_SCALE_DPS,
                 f32::from(gz) * GYRO_SCALE_DPS,
             ),
-            accel: Vector3::new(
+            accel: Acceleration3D::new::<standard_gravity>(
                 f32::from(ax) * ACCEL_SCALE_G,
                 f32::from(ay) * ACCEL_SCALE_G,
                 f32::from(az) * ACCEL_SCALE_G,

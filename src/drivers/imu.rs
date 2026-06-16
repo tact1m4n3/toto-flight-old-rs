@@ -1,13 +1,13 @@
-use nalgebra::Vector3;
+use crate::math::{Acceleration3D, AngularVelocity3D};
 
 pub mod lsm6dsv;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Data {
-    /// Angular rate in rad/s
-    pub gyro: Vector3<f32>,
-    /// Linear acceleration in m/s^2
-    pub accel: Vector3<f32>,
+    /// Raw gyro reading, NED, in the sensor's frame
+    pub gyro: AngularVelocity3D,
+    /// Raw acceleration reading, NED, in the sensor's frame
+    pub accel: Acceleration3D,
 }
 
 pub trait ImuSensor {
