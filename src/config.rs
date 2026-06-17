@@ -28,6 +28,19 @@ pub static INITIAL: OnceLock<Config> = OnceLock::new();
 static UPDATE: Channel<RawMutex, UpdateItem, 1> = Channel::new();
 static UPDATE_ACK: Signal<RawMutex, bool> = Signal::new();
 
+/// Must run in the highest priority task. Tasks of higher priority waiting on
+/// the initial config deadlock otherwise.
+pub async fn task<F: NorFlash>(flash: F, range: Range<u32>) {
+    let mut storage = Storage::new(flash, range);
+    let config = storage.read().await;
+    INITIAL.init(config).ok(); // This shouldn't happen, but if it does whatever
+
+    loop {
+        let config_item = UPDATE.receive().await;
+        UPDATE_ACK.signal(storage.update_config(config_item).await.is_ok());
+    }
+}
+
 #[derive(Debug)]
 pub enum UpdateError {
     CraftArmed,
@@ -39,7 +52,7 @@ pub enum UpdateItem {
     CraftName(String<16>),
     BoardForwardAngle(Angle),
     ImuCalibration(ImuCalibration),
-    BoardOrientation(Matrix3<f32>),
+    BoardToCraftTransform(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
     MotorMixerConfig { index: u8, config: MotorMixerConfig },
     ServoMixerConfig { index: u8, config: ServoMixerConfig },
@@ -66,7 +79,7 @@ pub struct Config {
     pub craft_name: String<16>,
     pub board_forward_angle: Angle,
     pub imu_calibration: ImuCalibration,
-    pub board_orientation: Matrix3<f32>,
+    pub board_to_craft_transform: Matrix3<f32>,
     pub rate_controller_config: RateControllerConfig,
     pub motors_config: [MotorMixerConfig; MAX_MOTOR_OUTPUTS],
     pub servos_config: [ServoMixerConfig; MAX_SERVO_OUTPUTS],
@@ -91,13 +104,13 @@ impl Config {
             mid_point_us: 1600,
             trim_min_us: 1200,
             trim_max_us: 1800,
-            mixer_gain: Vector3::new(-1.0, 1.0, 0.0),
+            mixer_gain: Vector3::new(-1.0, -1.0, 0.0),
         };
         config.servos_config[1] = ServoMixerConfig {
             mid_point_us: 1450,
             trim_min_us: 1200,
             trim_max_us: 1800,
-            mixer_gain: Vector3::new(-1.0, -1.0, 0.0),
+            mixer_gain: Vector3::new(-1.0, 1.0, 0.0),
         };
 
         config
@@ -114,7 +127,7 @@ impl Default for Config {
                 accel_bias: Acceleration3D::ZEROS,
                 accel_scale: Vector3::new(1.0, 1.0, 1.0),
             },
-            board_orientation: Matrix3::identity(),
+            board_to_craft_transform: Matrix3::identity(),
             rate_controller_config: RateControllerConfig {
                 roll: RateControllerAxisConfig {
                     kp: 7.0,
@@ -183,19 +196,6 @@ pub struct ServoMixerConfig {
     pub mixer_gain: Vector3<f32>,
 }
 
-/// Must run in the highest priority task. Tasks of higher priority waiting on
-/// the initial config deadlock otherwise.
-pub async fn task<F: NorFlash>(flash: F, range: Range<u32>) {
-    let mut storage = Storage::new(flash, range);
-    let config = storage.read().await.unwrap();
-    INITIAL.init(config).ok(); // This shouldn't happen, but if it does whatever
-
-    loop {
-        let config_item = UPDATE.receive().await;
-        UPDATE_ACK.signal(storage.update_config(config_item).await.is_ok());
-    }
-}
-
 struct Storage<F: NorFlash> {
     inner: MapStorage<StorageKey, F, NoCache>,
 }
@@ -207,9 +207,9 @@ impl<F: NorFlash> Storage<F> {
         }
     }
 
-    async fn read(&mut self) -> Result<Config, Error<F::Error>> {
+    async fn read(&mut self) -> Config {
         match self.read_inner().await {
-            Ok(config) => Ok(config),
+            Ok(config) => config,
             Err(err) => {
                 if let Error::Corrupted {} = err {
                     warn!("config in flash is corrupted. erasing all config");
@@ -217,7 +217,7 @@ impl<F: NorFlash> Storage<F> {
                 } else {
                     warn!("unexpected error while reading config");
                 }
-                Ok(Config::default())
+                Config::default()
             }
         }
     }
@@ -242,10 +242,10 @@ impl<F: NorFlash> Storage<F> {
                 )
                 .await?;
             }
-            UpdateItem::BoardOrientation(orientation) => {
+            UpdateItem::BoardToCraftTransform(orientation) => {
                 self.raw_write(
-                    &StorageKey::BoardOrientation,
-                    &StorageValue::BoardOrientation(orientation),
+                    &StorageKey::BoardToCraftTransform,
+                    &StorageValue::BoardToCraftTransform(orientation),
                 )
                 .await?;
             }
@@ -290,9 +290,9 @@ impl<F: NorFlash> Storage<F> {
             None => (),
         }
 
-        match self.raw_read(&StorageKey::BoardOrientation).await? {
-            Some(StorageValue::BoardOrientation(board_orientation)) => {
-                cfg.board_orientation = board_orientation;
+        match self.raw_read(&StorageKey::BoardToCraftTransform).await? {
+            Some(StorageValue::BoardToCraftTransform(board_orientation)) => {
+                cfg.board_to_craft_transform = board_orientation;
             }
             Some(_) => return Err(Error::Corrupted {}),
             None => (),
@@ -352,7 +352,7 @@ enum StorageKey {
     CraftName,
     BoardForwardAngle,
     ImuCalibration,
-    BoardOrientation,
+    BoardToCraftTransform,
     RateControllerConfig,
     MotorConfig { index: u8 },
     ServoConfig { index: u8 },
@@ -381,7 +381,7 @@ enum StorageValue {
     CraftName(String<16>),
     BoardForwardAngle(Angle),
     ImuCalibration(ImuCalibration),
-    BoardOrientation(Matrix3<f32>),
+    BoardToCraftTransform(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
     MotorConfig(MotorMixerConfig),
     ServoConfig(ServoMixerConfig),

@@ -1,6 +1,6 @@
 use embassy_sync::signal::Signal;
 use nalgebra::{Matrix3, Rotation3, Vector3};
-use uom::si::{acceleration::standard_gravity, angle::radian};
+use uom::si::angle::radian;
 
 use crate::{
     RawMutex, config,
@@ -44,18 +44,19 @@ pub async fn task_read<I: ImuSensor>(mut imu: I) {
 
         IMU_RAW_SAMPLE.signal(data);
 
-        DATA.set(Data {
-            gyro: AngularVelocity3D::from_base_unit(
-                cfg.board_orientation * data.gyro.as_base_unit(),
-            ) - cfg.imu_calibration.gyro_bias,
-            accel: Acceleration3D::from_base_unit(
-                cfg.board_orientation
-                    * data
-                        .accel
-                        .as_base_unit()
-                        .component_mul(&cfg.imu_calibration.accel_scale),
-            ) - cfg.imu_calibration.accel_bias,
-        });
+        let ImuSample {
+            mut gyro,
+            mut accel,
+        } = data;
+
+        gyro -= cfg.imu_calibration.gyro_bias;
+        gyro = gyro.transform(|v| cfg.board_to_craft_transform * v);
+
+        accel -= cfg.imu_calibration.accel_bias;
+        accel = accel.transform(|v| v.component_mul(&cfg.imu_calibration.accel_scale));
+        accel = accel.transform(|v| cfg.board_to_craft_transform * v);
+
+        DATA.set(Data { gyro, accel });
     }
 }
 
@@ -72,7 +73,7 @@ pub async fn task_calibrate() {
 
 // TODO: move orientation calibration someplace else and add accelerometer calibration
 async fn easy_calibration() {
-    const SAMPLE_COUNT: usize = 1000;
+    const SAMPLE_COUNT: usize = 100;
 
     let cfg = config::INITIAL.get().await;
 
@@ -88,21 +89,37 @@ async fn easy_calibration() {
     let gyro_mean = gyro_accum / SAMPLE_COUNT as f32;
     let accel_mean = accel_accum / SAMPLE_COUNT as f32;
 
-    let down = accel_mean.get::<standard_gravity>().normalize();
+    // In NED, stationary accelerometer measures -Gravity (Up).
+    // Negating it gives the actual Down vector.
+    let down = -accel_mean.as_base_unit().normalize();
 
-    let reference = if down.x.abs() < 0.9 {
+    // Default forward reference is the sensor's X axis. If the board is pitched ~90 degrees
+    // (nose pointing straight down or straight up), X is too close to the Down vector.
+    // Fall back to -Z (Board Top) as the forward reference.
+    let forward_ref = if down.x.abs() < 0.9 {
         Vector3::x()
     } else {
-        Vector3::y()
+        -Vector3::z()
     };
 
+    // In NED, Down x Forward = East
+    let unrotated_east = down.cross(&forward_ref).normalize();
+
+    // Apply the yaw offset around the Z (Down) axis
     let board_rotation = Rotation3::new(down * cfg.board_forward_angle.get::<radian>());
+    let east = board_rotation * unrotated_east;
 
-    let east = board_rotation * down.cross(&reference).normalize();
+    // In NED, East x Down = North
     let north = east.cross(&down).normalize();
-    let board_orientation = Matrix3::from_columns(&[north, east, down]);
 
-    let gyro_bias = AngularVelocity3D::from_base_unit(board_orientation * gyro_mean.as_base_unit());
+    // Matrix3::from_columns([north, east, down]) creates a transform
+    // FROM the Craft Frame TO the Board Frame.
+    let craft_to_board_transform = Matrix3::from_columns(&[north, east, down]);
+
+    // Transpose the transform to get the inverse, which is FROM the Board Frame TO the Craft Frame.
+    let board_to_craft_transform = craft_to_board_transform.transpose();
+
+    let gyro_bias = gyro_mean;
 
     config::UpdateItem::ImuCalibration(config::ImuCalibration {
         gyro_bias,
@@ -111,16 +128,17 @@ async fn easy_calibration() {
     .commit()
     .await
     .ok();
-    config::UpdateItem::BoardOrientation(board_orientation)
+    config::UpdateItem::BoardToCraftTransform(board_to_craft_transform)
         .commit()
         .await
         .ok();
+    crate::REBOOT.signal(());
 }
 
 #[derive(Clone, Copy)]
 pub struct Data {
-    /// (Should be) Filtered gyro reading, NED, in the board's frame
+    /// (Should be) Filtered gyro reading, NED, in the craft's frame
     pub gyro: AngularVelocity3D,
-    /// (Should be) Filtered accelerometer reading, NED, in the board's frame
+    /// (Should be) Filtered accelerometer reading, NED, in the craft's frame
     pub accel: Acceleration3D,
 }

@@ -29,6 +29,13 @@ impl<Q> QuantityVector3<Q> {
     pub const fn as_base_unit(&self) -> Vector3<f32> {
         self.inner
     }
+
+    pub fn transform<F: FnMut(Vector3<f32>) -> Vector3<f32>>(self, mut f: F) -> QuantityVector3<Q> {
+        QuantityVector3 {
+            inner: f(self.inner),
+            _quantity: PhantomData,
+        }
+    }
 }
 
 impl Acceleration3D {

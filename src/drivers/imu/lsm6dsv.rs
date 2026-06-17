@@ -12,9 +12,11 @@ use uom::si::{acceleration::standard_gravity, angular_velocity::degree_per_secon
 
 use crate::math::{Acceleration3D, AngularVelocity3D};
 
-pub type Lsm6dsv<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
-pub type Lsm6dsv16x<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
-pub type Lsm6dsv16b<SPI> = Lsm6dsvGeneric<SPI, 0x71, true>;
+pub type Lsm6dsv<SPI> = Lsm6dsvGeneric<SPI, 0x70>;
+pub type Lsm6dsv16x<SPI> = Lsm6dsvGeneric<SPI, 0x70>;
+// NOTE: This model seems to have accel axes in reverse order but when applying
+// this, the gyro readings after calibration seem scrambled.
+pub type Lsm6dsv16b<SPI> = Lsm6dsvGeneric<SPI, 0x71>;
 
 #[derive(Debug)]
 pub enum InitError<SpiE> {
@@ -28,12 +30,11 @@ impl<SpiE> From<SpiE> for InitError<SpiE> {
     }
 }
 
-pub struct Lsm6dsvGeneric<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool> {
+pub struct Lsm6dsvGeneric<SPI, const WHO_AM_I_REG: u8> {
     spi: SPI,
 }
 
-impl<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool>
-    Lsm6dsvGeneric<SPI, WHO_AM_I_REG, ACCEL_AXES_ORDER_REVERSED>
+impl<SPI, const WHO_AM_I_REG: u8> Lsm6dsvGeneric<SPI, WHO_AM_I_REG>
 where
     SPI: SpiDevice,
 {
@@ -115,8 +116,7 @@ where
     }
 }
 
-impl<SPI, const WHO_AM_I_REG: u8, const ACCEL_AXES_ORDER_REVERSED: bool> super::ImuSensor
-    for Lsm6dsvGeneric<SPI, WHO_AM_I_REG, ACCEL_AXES_ORDER_REVERSED>
+impl<SPI, const WHO_AM_I_REG: u8> super::ImuSensor for Lsm6dsvGeneric<SPI, WHO_AM_I_REG>
 where
     SPI: SpiDevice,
 {
@@ -137,27 +137,14 @@ where
         let gy = i16::from_le_bytes([buf[3], buf[4]]);
         let gz = i16::from_le_bytes([buf[5], buf[6]]);
 
-        let (ax, ay, az) = if ACCEL_AXES_ORDER_REVERSED {
-            (
-                // buf[7..=8]   = OUTX_L_A / OUTX_H_A  → accel X
-                // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
-                // buf[11..=12] = OUTZ_L_A / OUTZ_H_A  → accel Z
-                i16::from_le_bytes([buf[7], buf[8]]),
-                i16::from_le_bytes([buf[9], buf[10]]),
-                i16::from_le_bytes([buf[11], buf[12]]),
-            )
-        } else {
-            (
-                // buf[7..=8]   = OUTZ_L_A / OUTZ_H_A  → accel Z
-                // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
-                // buf[11..=12] = OUTX_L_A / OUTX_H_A  → accel X
-                i16::from_le_bytes([buf[11], buf[12]]),
-                i16::from_le_bytes([buf[9], buf[10]]),
-                i16::from_le_bytes([buf[7], buf[8]]),
-            )
-        };
-
-        let (ax, ay, az) = (ax, -ay, -az);
+        let (ax, ay, az) = (
+            // buf[7..=8]   = OUTX_L_A / OUTX_H_A  → accel X
+            // buf[9..=10]  = OUTY_L_A / OUTY_H_A  → accel Y
+            // buf[11..=12] = OUTZ_L_A / OUTZ_H_A  → accel Z
+            i16::from_le_bytes([buf[7], buf[8]]),
+            i16::from_le_bytes([buf[9], buf[10]]),
+            i16::from_le_bytes([buf[11], buf[12]]),
+        );
 
         Ok(super::Data {
             gyro: AngularVelocity3D::new::<degree_per_second>(

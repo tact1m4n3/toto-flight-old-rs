@@ -337,6 +337,8 @@ async fn main(thread_spawner: Spawner) -> ! {
     low_prio_spawner.spawn(task_receiver_channels_manager().unwrap());
     low_prio_spawner.spawn(task_receiver_read_crsf(receiver_uart_rx).unwrap());
     low_prio_spawner.spawn(task_receiver_telemetry_crsf(receiver_uart_tx).unwrap());
+    #[cfg(feature = "defmt")]
+    low_prio_spawner.spawn(task_sensors_debug_log().unwrap());
     low_prio_spawner.spawn(task_status_led(led_driver).unwrap());
     low_prio_spawner.spawn(task_usb_interface(usb_driver).unwrap());
 
@@ -467,6 +469,12 @@ async fn task_usb_interface(usb_driver: UsbDriver) {
 #[embassy_executor::task]
 async fn task_status_led(led_driver: PioWs2812Driver) {
     toto_flight::status_led::task(led_driver).await;
+}
+
+#[cfg(feature = "defmt")]
+#[embassy_executor::task]
+async fn task_sensors_debug_log() {
+    toto_flight::sensors::debug_log::task().await;
 }
 
 #[cfg(feature = "defmt")]
