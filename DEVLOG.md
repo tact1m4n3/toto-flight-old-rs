@@ -5,3 +5,9 @@ This is the story of a very confusing dead-lock. I was using a `LazyLock` to mak
 ## When the buffered uart interrupt priority is less than the uart reader task, you get a deadlock (when an error occurs?)
 
 ## Investigate why the battery voltage is not being sent over telemetry
+
+## Got dshot esc working by sending command 0 (STOP) when disarmed
+
+- TODO: Bad abstractions for motors in control (change configuration parameters etc.)
+
+## Imu data is very weird after sensor to body transform

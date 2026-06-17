@@ -34,6 +34,8 @@ impl Speed {
 #[repr(u16)]
 #[derive(Clone, Copy)]
 pub enum Command {
+    Stop = 0,
+
     Beep1 = 1,
     Beep2 = 2,
     Beep3 = 3,
@@ -42,6 +44,8 @@ pub enum Command {
 
     SpinDirectionNormal = 20,
     SpinDirectionReversed = 21,
+
+    ThrottleMin = 48,
 }
 
 pub const THROTTLE_MIN: u16 = 48;
@@ -115,13 +119,19 @@ impl<'a, PIO: Instance> DshotPio<'a, PIO> {
 }
 
 impl<'a, PIO: embassy_rp::pio::Instance> super::MotorOutput<1> for DshotPio<'a, PIO> {
+    fn disarm(&mut self) {
+        let dshot_out = u32::from(encode(Command::Stop as u16, false));
+        self.pio_instance.sm0.tx().push(dshot_out);
+    }
+
     fn write(&mut self, us: &[u16; 1]) {
         // map 1000..=2000 -> 48..=2047
         let us = u32::from(us[0]);
         // and-ing by 0x3FF ensures no overflow can happen on the multiplication
         // in case us is very big (it shouldn't be)
-        let command = (((us.saturating_sub(1000) & 0x3FF) * 0x7FF0) >> 14) + 48;
-        let dshot_out = u32::from(encode(command as u16, false));
+        let command = (((us.saturating_sub(1000) & 0x3FF) * 0x7FF0) >> 14) as u16
+            + Command::ThrottleMin as u16;
+        let dshot_out = u32::from(encode(command, false));
         self.pio_instance.sm0.tx().push(dshot_out);
     }
 

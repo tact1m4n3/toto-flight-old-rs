@@ -12,7 +12,7 @@ use crate::{
     RawMutex,
     config::{self, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::{MotorOutput, ServoOutput},
-    math::{AngularVelocity3D, Vector3Ext},
+    math::AngularVelocity3D,
     receiver, sensors,
     utils::{DurationExt, GuardedRefCell},
 };
@@ -242,32 +242,39 @@ pub async fn task_inner_loop<
                     )
                 });
 
-                // Will be `None` only if the passthrough rate_control from the slow loop is late
-                let maybe_manual_control = match command {
-                    Command::Disarmed => Some(ManualControl::IDLE),
-                    Command::Manual { throttle, throw } => Some(ManualControl { throttle, throw }),
-                    _ => {
-                        let maybe_rate_control = if let Command::Rate { throttle, rate } = command {
-                            Some(RateControl { throttle, rate })
-                        } else {
-                            slow_loop_target_rate
-                        };
+                if let Command::Disarmed = command {
+                    outputs.motors.disarm();
+                } else {
+                    // Will be `None` only if the passthrough rate_control from the slow loop is late
+                    let maybe_manual_control = match command {
+                        Command::Disarmed => unreachable!(),
+                        Command::Manual { throttle, throw } => {
+                            Some(ManualControl { throttle, throw })
+                        }
+                        _ => {
+                            let maybe_rate_control =
+                                if let Command::Rate { throttle, rate } = command {
+                                    Some(RateControl { throttle, rate })
+                                } else {
+                                    slow_loop_target_rate
+                                };
 
-                        maybe_rate_control.map(|rate_control| {
-                            let sensors::imu::Data { gyro, .. } = sensors::imu::DATA.get();
-                            rate_control.target_manual(
-                                &mut state.rate_controller,
-                                gyro.get::<degree_per_second>(),
-                                PERIOD.dt_f32(),
-                            )
-                        })
+                            maybe_rate_control.map(|rate_control| {
+                                let sensors::imu::Data { gyro, .. } = sensors::imu::DATA.get();
+                                rate_control.target_manual(
+                                    &mut state.rate_controller,
+                                    gyro.get::<degree_per_second>(),
+                                    PERIOD.dt_f32(),
+                                )
+                            })
+                        }
+                    };
+
+                    if let Some(manual_control) = maybe_manual_control {
+                        manual_control
+                            .mix(&state.motor_mixer_config, &state.servo_mixer_config)
+                            .apply(&mut outputs);
                     }
-                };
-
-                if let Some(manual_control) = maybe_manual_control {
-                    manual_control
-                        .mix(&state.motor_mixer_config, &state.servo_mixer_config)
-                        .apply(&mut outputs);
                 }
             });
         }
@@ -472,11 +479,6 @@ struct ManualControl {
 }
 
 impl ManualControl {
-    const IDLE: Self = Self {
-        throttle: 1000,
-        throw: Vector3::ZEROS,
-    };
-
     fn mix<const MOTORS: usize, const SERVOS: usize>(
         self,
         motors_cfg: &[MotorMixerConfig; MOTORS],
