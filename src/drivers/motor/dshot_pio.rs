@@ -7,6 +7,8 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Timer};
 
+use super::SpinDirection;
+
 #[derive(Clone, Copy)]
 pub enum Speed {
     Dshot150,
@@ -18,34 +20,28 @@ pub enum Speed {
 impl Speed {
     // TODO: maybe compute a fixed point and keep decimals
     fn get_clk_div(self) -> u16 {
-        match self {
-            Speed::Dshot150 => Self::compute(150) as u16,
-            Speed::Dshot300 => Self::compute(300) as u16,
-            Speed::Dshot600 => Self::compute(600) as u16,
-            Speed::Dshot1200 => Self::compute(1200) as u16,
-        }
-    }
+        let raw = match self {
+            Speed::Dshot150 => 150,
+            Speed::Dshot300 => 300,
+            Speed::Dshot600 => 600,
+            Speed::Dshot1200 => 1200,
+        };
 
-    fn compute(raw: u32) -> u32 {
-        embassy_rp::clocks::clk_sys_freq() / (raw * 8 * 1000)
+        (embassy_rp::clocks::clk_sys_freq() / (raw * 8000)) as u16
     }
 }
 
 #[repr(u16)]
 #[derive(Clone, Copy)]
-pub enum Beep {
-    _1 = 1,
-    _2 = 2,
-    _3 = 3,
-    _4 = 4,
-    _5 = 5,
-}
+pub enum Command {
+    Beep1 = 1,
+    Beep2 = 2,
+    Beep3 = 3,
+    Beep4 = 4,
+    Beep5 = 5,
 
-#[repr(u16)]
-#[derive(Clone, Copy)]
-pub enum SpinDirection {
-    Normal = 20,
-    Reversed = 21,
+    SpinDirectionNormal = 20,
+    SpinDirectionReversed = 21,
 }
 
 pub const THROTTLE_MIN: u16 = 48;
@@ -116,25 +112,6 @@ impl<'a, PIO: Instance> DshotPio<'a, PIO> {
         // Return struct of 1 configured DShot state machine
         DshotPio { pio_instance: pio }
     }
-
-    pub async fn set_direction(&mut self, direction: SpinDirection) {
-        for _ in 0..6 {
-            self.pio_instance
-                .sm0
-                .tx()
-                .wait_push(u32::from(encode(direction as u16, false)))
-                .await;
-        }
-    }
-
-    pub async fn beep(&mut self, beep: Beep) {
-        self.pio_instance
-            .sm0
-            .tx()
-            .wait_push(u32::from(encode(beep as u16, false)))
-            .await;
-        Timer::after(Duration::from_millis(265)).await; // must sleep at least 260 millis before the next command
-    }
 }
 
 impl<'a, PIO: embassy_rp::pio::Instance> super::MotorOutput<1> for DshotPio<'a, PIO> {
@@ -147,22 +124,34 @@ impl<'a, PIO: embassy_rp::pio::Instance> super::MotorOutput<1> for DshotPio<'a, 
         let dshot_out = u32::from(encode(command as u16, false));
         self.pio_instance.sm0.tx().push(dshot_out);
     }
+
+    async fn beep(&mut self) {
+        self.pio_instance
+            .sm0
+            .tx()
+            .wait_push(u32::from(encode(Command::Beep1 as u16, false)))
+            .await;
+        Timer::after(Duration::from_millis(265)).await; // must sleep at least 260 millis before the next command
+    }
+
+    async fn set_spin_direction(&mut self, direction: SpinDirection) {
+        let command = match direction {
+            SpinDirection::Normal => Command::SpinDirectionNormal,
+            SpinDirection::Reversed => Command::SpinDirectionReversed,
+        };
+        for _ in 0..6 {
+            self.pio_instance
+                .sm0
+                .tx()
+                .wait_push(u32::from(encode(command as u16, false)))
+                .await;
+        }
+    }
 }
 
 fn encode(command: u16, telemetry: bool) -> u16 {
-    // value = 100000101100
-    // (>>4) = 000010000010 # right shift value by 4
-    // (^) = 100010101110 # XOR with value
-    // (>>8) = 000000001000 # right shift value by 8
-    // (^) = 100010100110 # XOR with previous XOR
-    // (0x0F) = 000000001111 # Mask 0x0F
-    // (&) = 000000000110 # CRC
+    let packet = (command << 1) | (telemetry as u16);
+    let crc = (packet ^ (packet >> 4) ^ (packet >> 8)) & 0x0F;
 
-    let crc = {
-        let a = (command >> 4) ^ command;
-        let b = (a >> 8) ^ a;
-        b & 0xF
-    };
-
-    ((command & 0x7FF) << 5) | (u16::from(telemetry) << 4) | crc
+    ((packet & 0xFFF) << 4) | crc
 }

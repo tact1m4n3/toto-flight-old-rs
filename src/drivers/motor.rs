@@ -1,11 +1,19 @@
-// pub mod dshot;
+use embedded_hal::pwm::SetDutyCycle;
 
 pub mod dshot_pio;
 
-use embedded_hal::pwm::SetDutyCycle;
+#[derive(Clone, Copy)]
+pub enum SpinDirection {
+    Normal,
+    Reversed,
+}
 
 pub trait MotorOutput<const N: usize> {
     fn write(&mut self, us: &[u16; N]);
+    async fn beep(&mut self) {}
+    async fn set_spin_direction(&mut self, direction: SpinDirection) {
+        _ = direction;
+    }
 }
 
 pub trait ServoOutput<const N: usize> {
