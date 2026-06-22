@@ -2083,6 +2083,7 @@ dependencies = [
  "libm",
  "nalgebra",
  "num-traits",
+ "num_enum",
  "panic-probe",
  "pio",
  "postcard",

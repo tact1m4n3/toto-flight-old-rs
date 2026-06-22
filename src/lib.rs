@@ -23,6 +23,7 @@ pub mod control;
 pub mod cpu_usage;
 pub mod drivers;
 pub mod math;
+pub mod msp;
 pub mod receiver;
 pub mod sensors;
 pub mod status_led;

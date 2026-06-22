@@ -11,3 +11,5 @@ This is the story of a very confusing dead-lock. I was using a `LazyLock` to mak
 - TODO: Bad abstractions for motors in control (change configuration parameters etc.)
 
 ## Imu data is very weird after sensor to body transform
+
+- Apparently the second flight controller didn't have the accelerometer axes reversed

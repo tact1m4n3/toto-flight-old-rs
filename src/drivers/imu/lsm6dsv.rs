@@ -14,7 +14,8 @@ use crate::math::{Acceleration3D, AngularVelocity3D};
 
 pub type Lsm6dsv<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
 pub type Lsm6dsv16x<SPI> = Lsm6dsvGeneric<SPI, 0x70, false>;
-pub type Lsm6dsv16b<SPI> = Lsm6dsvGeneric<SPI, 0x71, true>;
+pub type Lsm6dsv16bAccelAxesRev<SPI> = Lsm6dsvGeneric<SPI, 0x71, true>;
+pub type Lsm6dsv16b<SPI> = Lsm6dsvGeneric<SPI, 0x71, false>;
 
 #[derive(Debug)]
 pub enum InitError<SpiE> {

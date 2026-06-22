@@ -50,11 +50,11 @@ pub async fn task_read<I: ImuSensor>(mut imu: I) {
         } = data;
 
         gyro -= cfg.imu_calibration.gyro_bias;
-        gyro = gyro.transform(|v| cfg.board_to_craft_transform * v);
+        gyro = gyro.transform(|v| cfg.imu_to_body_transform * v);
 
         accel -= cfg.imu_calibration.accel_bias;
         accel = accel.transform(|v| v.component_mul(&cfg.imu_calibration.accel_scale));
-        accel = accel.transform(|v| cfg.board_to_craft_transform * v);
+        accel = accel.transform(|v| cfg.imu_to_body_transform * v);
 
         DATA.set(Data { gyro, accel });
     }
@@ -89,35 +89,35 @@ async fn easy_calibration() {
     let gyro_mean = gyro_accum / SAMPLE_COUNT as f32;
     let accel_mean = accel_accum / SAMPLE_COUNT as f32;
 
-    // In NED, stationary accelerometer measures -Gravity (Up).
+    // In FRD, stationary accelerometer measures -Gravity (Up).
     // Negating it gives the actual Down vector.
     let down = -accel_mean.as_base_unit().normalize();
 
-    // Default forward reference is the sensor's X axis. If the board is pitched ~90 degrees
+    // Default front reference is the sensor's X axis. If the board is pitched ~90 degrees
     // (nose pointing straight down or straight up), X is too close to the Down vector.
     // Fall back to -Z (Board Top) as the forward reference.
-    let forward_ref = if down.x.abs() < 0.9 {
+    let front_ref = if down.x.abs() < 0.9 {
         Vector3::x()
     } else {
         -Vector3::z()
     };
 
-    // In NED, Down x Forward = East
-    let unrotated_east = down.cross(&forward_ref).normalize();
+    // In FRD, Down x Front = East
+    let unrotated_right = down.cross(&front_ref).normalize();
 
     // Apply the yaw offset around the Z (Down) axis
     let board_rotation = Rotation3::new(down * cfg.board_forward_angle.get::<radian>());
-    let east = board_rotation * unrotated_east;
+    let right = board_rotation * unrotated_right;
 
-    // In NED, East x Down = North
-    let north = east.cross(&down).normalize();
+    // In FRD, Right x Down = Front
+    let front = right.cross(&down).normalize();
 
     // Matrix3::from_columns([north, east, down]) creates a transform
-    // FROM the Craft Frame TO the Board Frame.
-    let craft_to_board_transform = Matrix3::from_columns(&[north, east, down]);
+    // FROM the Body Frame TO the Sensor Frame.
+    let body_to_imu_transform = Matrix3::from_columns(&[front, right, down]);
 
-    // Transpose the transform to get the inverse, which is FROM the Board Frame TO the Craft Frame.
-    let board_to_craft_transform = craft_to_board_transform.transpose();
+    // Transpose the transform to get the inverse, which is FROM the Sensor Frame TO the Body Frame.
+    let imu_to_body_transform = body_to_imu_transform.transpose();
 
     let gyro_bias = gyro_mean;
 
@@ -128,7 +128,7 @@ async fn easy_calibration() {
     .commit()
     .await
     .ok();
-    config::UpdateItem::BoardToCraftTransform(board_to_craft_transform)
+    config::UpdateItem::ImuToBodyTransform(imu_to_body_transform)
         .commit()
         .await
         .ok();
@@ -137,8 +137,8 @@ async fn easy_calibration() {
 
 #[derive(Clone, Copy)]
 pub struct Data {
-    /// (Should be) Filtered gyro reading, NED, in the craft's frame
+    /// (Should be) Filtered gyro reading, FRD, in the body frame
     pub gyro: AngularVelocity3D,
-    /// (Should be) Filtered accelerometer reading, NED, in the craft's frame
+    /// (Should be) Filtered accelerometer reading, FRD, in the body frame
     pub accel: Acceleration3D,
 }

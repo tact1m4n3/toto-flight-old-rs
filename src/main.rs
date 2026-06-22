@@ -11,7 +11,7 @@ use embassy_rp::{
     peripherals,
     peripherals::*,
     pio,
-    pio_programs::ws2812,
+    pio_programs::{uart as pio_uart, ws2812},
     pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
@@ -36,6 +36,9 @@ type Outputs = toto_flight::control::Outputs<
     dshot_pio::DshotPio<'static, PIO0>,
     [pwm::PwmOutput<'static>; 2],
 >;
+
+type VtxUartTx = pio_uart::PioUartTx<'static, PIO1, 0>;
+type VtxUartRx = pio_uart::PioUartRx<'static, PIO1, 1>;
 
 type I2cBus = i2c::I2c<'static, I2C0, i2c::Async>;
 type SharedI2cBus = AsyncMutex<CriticalSectionRawMutex, I2cBus>;
@@ -93,6 +96,11 @@ assign_resources! {
         tx_pin: PIN_4,
         rx_pin: PIN_5,
     },
+    vtx: VtxPeripherals {
+        pio: PIO1,
+        tx_pin: PIN_12,
+        rx_pin: PIN_13,
+    },
     i2c_bus: I2cBusPeripherals {
         i2c: I2C0,
         sda_pin: PIN_32,
@@ -131,6 +139,7 @@ embassy_rp::bind_interrupts!(pub struct Irqs {
     UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
+    PIO1_IRQ_0 => pio::InterruptHandler<PIO1>;
     PIO2_IRQ_0 => pio::InterruptHandler<PIO2>;
 });
 
@@ -167,6 +176,7 @@ async fn main(thread_spawner: Spawner) -> ! {
     interrupt::UART0_IRQ.set_priority(interrupt::Priority::P2);
     interrupt::UART1_IRQ.set_priority(interrupt::Priority::P2);
     interrupt::USBCTRL_IRQ.set_priority(interrupt::Priority::P2);
+    interrupt::PIO1_IRQ_0.set_priority(interrupt::Priority::P2);
     interrupt::PIO2_IRQ_0.set_priority(interrupt::Priority::P2);
 
     let esc_dshot = dshot_pio::DshotPio::new(
@@ -268,6 +278,32 @@ async fn main(thread_spawner: Spawner) -> ! {
         )
     };
 
+    let (vtx_uart_tx, vtx_uart_rx) = {
+        let baud_rate = 115_200;
+
+        let mut pio = pio::Pio::new(r.vtx.pio, Irqs);
+
+        let tx_program = pio_uart::PioUartTxProgram::new(&mut pio.common);
+        let rx_program = pio_uart::PioUartRxProgram::new(&mut pio.common);
+
+        let tx = pio_uart::PioUartTx::new(
+            baud_rate,
+            &mut pio.common,
+            pio.sm0,
+            r.vtx.tx_pin,
+            &tx_program,
+        );
+        let rx = pio_uart::PioUartRx::new(
+            baud_rate,
+            &mut pio.common,
+            pio.sm1,
+            r.vtx.rx_pin,
+            &rx_program,
+        );
+
+        (tx, rx)
+    };
+
     let i2c_device = {
         static I2C_BUS: StaticCell<SharedI2cBus> = StaticCell::new();
 
@@ -307,14 +343,14 @@ async fn main(thread_spawner: Spawner) -> ! {
     let usb_driver = usb::Driver::new(r.usb.usb, Irqs);
 
     let mut led_pio = pio::Pio::new(r.led.pio, Irqs);
-    let program = ws2812::PioWs2812Program::new(&mut led_pio.common);
+    let ws2812_program = ws2812::PioWs2812Program::new(&mut led_pio.common);
     let led_driver = PioWs2812Driver::new(
         &mut led_pio.common,
         led_pio.sm0,
         r.led.dma,
         Irqs,
         r.led.pin,
-        &program,
+        &ws2812_program,
     );
 
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
@@ -340,10 +376,12 @@ async fn main(thread_spawner: Spawner) -> ! {
     low_prio_spawner.spawn(task_receiver_channels_manager().unwrap());
     low_prio_spawner.spawn(task_receiver_read_crsf(receiver_uart_rx).unwrap());
     low_prio_spawner.spawn(task_receiver_telemetry_crsf(receiver_uart_tx).unwrap());
-    #[cfg(feature = "defmt")]
-    low_prio_spawner.spawn(task_sensors_debug_log().unwrap());
+    // #[cfg(feature = "defmt")]
+    // low_prio_spawner.spawn(task_sensors_debug_log().unwrap());
     low_prio_spawner.spawn(task_status_led(led_driver).unwrap());
     low_prio_spawner.spawn(task_usb_interface(usb_driver).unwrap());
+    low_prio_spawner.spawn(task_vtx_msp_read(vtx_uart_rx).unwrap());
+    low_prio_spawner.spawn(task_vtx_msp_write(vtx_uart_tx).unwrap());
 
     let mut maybe_black_box = {
         let sd_card = embedded_sdmmc::SdCard::new_with_options(
@@ -462,6 +500,16 @@ async fn task_receiver_channels_manager() {
 #[embassy_executor::task]
 async fn task_receiver_telemetry_crsf(uart_tx: uart::BufferedUartTx) {
     toto_flight::receiver::task_telemetry(uart_tx).await;
+}
+
+#[embassy_executor::task]
+async fn task_vtx_msp_read(uart_rx: VtxUartRx) {
+    toto_flight::msp::task_read(uart_rx).await;
+}
+
+#[embassy_executor::task]
+async fn task_vtx_msp_write(uart_tx: VtxUartTx) {
+    toto_flight::msp::task_write(uart_tx).await;
 }
 
 #[embassy_executor::task]

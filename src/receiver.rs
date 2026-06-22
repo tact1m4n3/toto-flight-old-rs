@@ -7,6 +7,7 @@ use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
 use uom::si::{
     electric_charge::milliampere_hour, electric_current::deciampere, electric_potential::decivolt,
+    velocity::meter_per_second,
 };
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
     utils::{SyncWatch, US_TO_NEG_ONE_ONE, read_process_and_consume},
 };
 
-pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new([1500; 16]);
+pub static CHANNELS: SyncWatch<RawMutex, Channels> = SyncWatch::new(Channels::DEFAULT);
 pub static COMMAND: Watch<RawMutex, Command, 1> = Watch::new();
 pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats {
     uplink_link_quality: 0,
@@ -36,24 +37,24 @@ pub struct LinkStats {
 
 pub async fn task_channels_manager() {
     let mut arm_switch = ChannelCondition {
-        channel_idx: 4,
+        aux_channel_index: 0,
         range: 1700..=2000,
         state: false,
     };
     let mut flight_mode_manager = FlightModeManager {
         rate_mode_condition: ChannelCondition {
-            channel_idx: 5,
+            aux_channel_index: 1,
             range: 1400..=1600,
             state: false,
         },
         angle_mode_condition: ChannelCondition {
-            channel_idx: 5,
+            aux_channel_index: 1,
             range: 1800..=2000,
             state: false,
         },
     };
     let mut auto_tune_switch = ChannelCondition {
-        channel_idx: 6,
+        aux_channel_index: 2,
         range: 1700..=2000,
         state: false,
     };
@@ -75,25 +76,25 @@ pub async fn task_channels_manager() {
         let command = if arm_switch.state {
             match flight_mode {
                 FlightMode::Manual => Command::Manual {
-                    throttle: channels[2],
+                    throttle: channels.throttle(),
                     throw: Vector3::new(
-                        channels[0] as f32 - 1500.0,
-                        channels[1] as f32 - 1500.0,
-                        channels[3] as f32 - 1500.0,
+                        channels.roll() as f32 - 1500.0,
+                        channels.pitch() as f32 - 1500.0,
+                        channels.yaw() as f32 - 1500.0,
                     ),
                 },
                 FlightMode::Rate => Command::Rate {
-                    throttle: channels[2],
+                    throttle: channels.throttle(),
                     rate: Vector3::new(
-                        US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
-                        US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
-                        US_TO_NEG_ONE_ONE.map(channels[3] as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels.pitch() as f32) * 45.0,
+                        US_TO_NEG_ONE_ONE.map(channels.yaw() as f32) * 45.0,
                     ),
                 },
                 FlightMode::Angle => Command::Angle {
-                    throttle: channels[2],
-                    roll_angle: US_TO_NEG_ONE_ONE.map(channels[0] as f32) * 45.0,
-                    pitch_angle: US_TO_NEG_ONE_ONE.map(channels[1] as f32) * 45.0,
+                    throttle: channels.throttle(),
+                    roll_angle: US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 45.0,
+                    pitch_angle: US_TO_NEG_ONE_ONE.map(channels.pitch() as f32) * 45.0,
                 },
             }
         } else {
@@ -121,8 +122,9 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
 
                 match packet {
                     crsf::Packet::RcChannelsPacked(raw_channels) => {
-                        let channels: [u16; 16] =
+                        let raw_channels: [u16; 16] =
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
+                        let channels = Channels::from_aetr1234(&raw_channels);
                         CHANNELS.set(channels);
                         CHANNELS_RECEIVED.signal(());
                     }
@@ -176,6 +178,24 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
                 warn!("failed to write to battery telemetry");
             }
         }
+
+        {
+            let gps = sensors::gps::DATA.get();
+
+            let packet = crsf::Gps {
+                latitude: (gps.latitude.get::<uom::si::angle::degree>() * 1e7) as i32,
+                longitude: (gps.longitude.get::<uom::si::angle::degree>() * 1e7) as i32,
+                altitude: (gps.altitude.get::<uom::si::length::meter>() * 100.0) as u16,
+                heading: (gps.heading.get::<uom::si::angle::degree>() * 100.0) as u16,
+                groundspeed: (gps.velocity_over_ground.get::<meter_per_second>() * 100.0) as u16,
+                satellites: gps.num_sat,
+            };
+
+            let len = packet.dump(&mut buf).unwrap(); // this can't fail as we have a big enough buffer
+            if writer.write_all(&buf[..len]).await.is_err() {
+                warn!("failed to write to battery telemetry");
+            }
+        }
     }
 }
 
@@ -195,7 +215,7 @@ struct FlightModeManager {
 }
 
 impl FlightModeManager {
-    pub fn update(&mut self, channels: &[u16; 16]) -> FlightMode {
+    pub fn update(&mut self, channels: &Channels) -> FlightMode {
         self.rate_mode_condition.update(channels);
         self.angle_mode_condition.update(channels);
         if self.angle_mode_condition.state {
@@ -208,15 +228,63 @@ impl FlightModeManager {
     }
 }
 
+/// Channels struct with guaranteed order: Throttle, Roll, Pitch, Yaw, AuxN.
+#[derive(Clone, Copy)]
+pub struct Channels([u16; 16]);
+
+impl Channels {
+    pub const DEFAULT: Channels = Channels([0; 16]);
+    pub const AUX_CHANNEL_COUNT: usize = 12;
+
+    pub fn from_aetr1234(raw: &[u16; 16]) -> Self {
+        let mut inner = [0u16; 16];
+        inner[0..4].copy_from_slice(&[raw[2], raw[0], raw[1], raw[3]]);
+        inner[4..16].copy_from_slice(&raw[4..16]);
+        Self(inner)
+    }
+
+    pub fn as_slice(&self) -> &[u16; 16] {
+        &self.0
+    }
+
+    pub fn throttle(&self) -> u16 {
+        self.0[0]
+    }
+
+    pub fn roll(&self) -> u16 {
+        self.0[1]
+    }
+
+    pub fn pitch(&self) -> u16 {
+        self.0[2]
+    }
+
+    pub fn yaw(&self) -> u16 {
+        self.0[3]
+    }
+
+    pub fn aux(&self, index: usize) -> u16 {
+        assert!(index < Self::AUX_CHANNEL_COUNT);
+        self.0[4 + index]
+    }
+
+    pub fn to_msp_format(&self) -> [u16; 16] {
+        let mut out = [0u16; 16];
+        out[0..4].copy_from_slice(&[self.roll(), self.pitch(), self.yaw(), self.throttle()]);
+        out[4..16].copy_from_slice(&self.0[4..16]);
+        out
+    }
+}
+
 struct ChannelCondition {
-    channel_idx: u8,
+    aux_channel_index: usize,
     range: RangeInclusive<u16>,
     state: bool,
 }
 
 impl ChannelCondition {
-    fn update(&mut self, channels: &[u16; 16]) -> Option<bool> {
-        let value = channels[self.channel_idx as usize];
+    fn update(&mut self, channels: &Channels) -> Option<bool> {
+        let value = channels.aux(self.aux_channel_index);
         match self.state {
             false if self.range.contains(&value) => {
                 self.state = true;

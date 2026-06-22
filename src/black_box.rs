@@ -48,7 +48,7 @@ pub struct Storage<SPI: SpiDevice, D: DelayNs> {
     gps_watcher: SyncWatchReader<'static, RawMutex, sensors::gps::Data>,
     battery_watcher: SyncWatchReader<'static, RawMutex, sensors::battery::Data>,
     attitude_watcher: SyncWatchReader<'static, RawMutex, nalgebra::UnitQuaternion<f32>>,
-    channels_watcher: SyncWatchReader<'static, RawMutex, [u16; 16]>,
+    channels_watcher: SyncWatchReader<'static, RawMutex, receiver::Channels>,
     link_stats_watcher: SyncWatchReader<'static, RawMutex, receiver::LinkStats>,
 }
 
@@ -218,7 +218,7 @@ impl<SPI: SpiDevice, D: DelayNs> Storage<SPI, D> {
         }
 
         if let Some(channels) = self.channels_watcher.get_if_changed() {
-            log::write_rc_channels(&mut file, timestamp_us, &channels)?;
+            log::write_rc_channels(&mut file, timestamp_us, channels.as_slice())?;
         }
 
         if let Some(stats) = self.link_stats_watcher.get_if_changed() {

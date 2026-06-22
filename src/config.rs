@@ -52,7 +52,7 @@ pub enum UpdateItem {
     CraftName(String<16>),
     BoardForwardAngle(Angle),
     ImuCalibration(ImuCalibration),
-    BoardToCraftTransform(Matrix3<f32>),
+    ImuToBodyTransform(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
     MotorMixerConfig { index: u8, config: MotorMixerConfig },
     ServoMixerConfig { index: u8, config: ServoMixerConfig },
@@ -79,7 +79,7 @@ pub struct Config {
     pub craft_name: String<16>,
     pub board_forward_angle: Angle,
     pub imu_calibration: ImuCalibration,
-    pub board_to_craft_transform: Matrix3<f32>,
+    pub imu_to_body_transform: Matrix3<f32>,
     pub rate_controller_config: RateControllerConfig,
     pub motors_config: [MotorMixerConfig; MAX_MOTOR_OUTPUTS],
     pub servos_config: [ServoMixerConfig; MAX_SERVO_OUTPUTS],
@@ -127,7 +127,7 @@ impl Default for Config {
                 accel_bias: Acceleration3D::ZEROS,
                 accel_scale: Vector3::new(1.0, 1.0, 1.0),
             },
-            board_to_craft_transform: Matrix3::identity(),
+            imu_to_body_transform: Matrix3::identity(),
             rate_controller_config: RateControllerConfig {
                 roll: RateControllerAxisConfig {
                     kp: 7.0,
@@ -242,7 +242,7 @@ impl<F: NorFlash> Storage<F> {
                 )
                 .await?;
             }
-            UpdateItem::BoardToCraftTransform(orientation) => {
+            UpdateItem::ImuToBodyTransform(orientation) => {
                 self.raw_write(
                     &StorageKey::BoardToCraftTransform,
                     &StorageValue::BoardToCraftTransform(orientation),
@@ -292,7 +292,7 @@ impl<F: NorFlash> Storage<F> {
 
         match self.raw_read(&StorageKey::BoardToCraftTransform).await? {
             Some(StorageValue::BoardToCraftTransform(board_orientation)) => {
-                cfg.board_to_craft_transform = board_orientation;
+                cfg.imu_to_body_transform = board_orientation;
             }
             Some(_) => return Err(Error::Corrupted {}),
             None => (),
