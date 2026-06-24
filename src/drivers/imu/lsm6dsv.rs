@@ -186,6 +186,7 @@ const CTRL4_DRDY_PULSED: u8 = 0x02;
 const CTRL6: u8 = 0x15;
 // LPF1_G_BW [6:4] — UltraLight (widest, lowest latency) = 0b000
 const CTRL6_LPF1_G_BW_ULTRALIGHT: u8 = 0x00;
+// const CTRL6_LPF1_G_BW_MEDIUM: u8 = 0x04 << 4;
 const CTRL6_FS_G_2000DPS: u8 = 0x04;
 
 const CTRL7: u8 = 0x16;

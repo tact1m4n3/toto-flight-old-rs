@@ -38,24 +38,24 @@ pub struct LinkStats {
 pub async fn task_channels_manager() {
     let mut arm_switch = ChannelCondition {
         aux_channel_index: 0,
-        range: 1700..=2000,
+        range: 1700..=2100,
         state: false,
     };
     let mut flight_mode_manager = FlightModeManager {
         rate_mode_condition: ChannelCondition {
-            aux_channel_index: 1,
-            range: 1400..=1600,
+            aux_channel_index: 2,
+            range: 1300..=1700,
             state: false,
         },
         angle_mode_condition: ChannelCondition {
-            aux_channel_index: 1,
-            range: 1800..=2000,
+            aux_channel_index: 2,
+            range: 1800..=2100,
             state: false,
         },
     };
     let mut auto_tune_switch = ChannelCondition {
-        aux_channel_index: 2,
-        range: 1700..=2000,
+        aux_channel_index: 1,
+        range: 1700..=2100,
         state: false,
     };
 
