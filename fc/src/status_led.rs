@@ -1,11 +1,11 @@
 use embassy_time::{Duration, Timer};
-use smart_leds::{RGB8, SmartLedsWriteAsync, colors};
+use smart_leds::colors;
 
-use crate::control;
+use crate::{control, drivers::led_strip::LedStrip};
 
 // TODO: support led strips (maybe display the battery level)
 
-pub async fn task<L: SmartLedsWriteAsync<Color = RGB8>>(mut led: L) {
+pub async fn task<L: LedStrip>(mut led: L) {
     loop {
         let status = control::status();
 
@@ -21,9 +21,9 @@ pub async fn task<L: SmartLedsWriteAsync<Color = RGB8>>(mut led: L) {
             Duration::from_millis(500)
         };
 
-        led.write([color]).await.ok();
+        led.write(&[color]).await;
         Timer::after(delay).await;
-        led.write([colors::BLACK]).await.ok();
+        led.write(&[colors::BLACK]).await;
         Timer::after(delay).await;
     }
 }
