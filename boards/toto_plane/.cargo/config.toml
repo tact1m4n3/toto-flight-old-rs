@@ -1,6 +1,6 @@
 [alias]
-dev_run = "run --features defmt,cpu-usage"
-dev_build = "build --features defmt,cpu-usage"
+dev_run = "run --features debug"
+dev_build = "build --features debug"
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-rs run --chip RP235x"

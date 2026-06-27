@@ -1,0 +1,68 @@
+[package]
+name = "toto-flight"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+debug = [
+    "fc/cpu-usage",
+    "fc/defmt",
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "panic-probe/print-defmt",
+]
+
+[dependencies]
+fc = { path = "../../fc", features = ["rp"] }
+
+cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+embedded-hal-bus = { version = "0.3.0", features = ["async"] }
+embedded-hal-nb = "1.0.0"
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+embedded-storage-async = "0.4.1"
+
+# embassy-executor = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+# embassy-rp = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller", features = ["rp235xb", "time-driver", "unstable-pac"] }
+# embassy-time = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+# embassy-embedded-hal = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+# embassy-sync = { git = "https://github.com/tact1m4n3/embassy", branch = "flight-controller" }
+embassy-executor = { path = "../../../embassy/embassy-executor", features = ["platform-cortex-m", "executor-thread", "executor-interrupt"] }
+embassy-rp = { path = "../../../embassy/embassy-rp", features = ["rp235xb", "time-driver", "unstable-pac"] }
+embassy-time = { path = "../../../embassy/embassy-time" }
+embassy-embedded-hal = { path = "../../../embassy/embassy-embedded-hal" }
+embassy-sync = { path = "../../../embassy/embassy-sync" }
+
+defmt = { version = "1.0.1", optional = true }
+defmt-rtt = { version = "1.1.0", optional = true, features = ["disable-blocking-mode"] }
+panic-probe = { version = "1.0.0" }
+
+embedded-sdmmc = { git = "https://github.com/tact1m4n3/embedded-sdmmc-rs", branch = "max_file_size_error", default-features = false }
+
+fixed = "1.30.0"
+static_cell = "2.1.1"
+
+smart-leds = "0.4.0"
+
+[profile.dev]
+codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
+opt-level = "s"
+overflow-checks = true
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = "s"
+overflow-checks = false
+panic = "abort"

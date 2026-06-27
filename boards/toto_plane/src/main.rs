@@ -21,21 +21,17 @@ use embedded_sdmmc::sdcard::spi::AcquireOpts;
 use fixed::FixedU16;
 use static_cell::StaticCell;
 
-#[cfg(feature = "defmt")]
+#[cfg(feature = "debug")]
 use defmt_rtt as _;
 use panic_probe as _;
 
 #[macro_use]
-extern crate toto_flight;
+extern crate fc;
 
-use toto_flight::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b, motor::dshot_pio};
+use fc::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b, motor::dshot_pio};
 
-type Outputs = toto_flight::control::Outputs<
-    1,
-    2,
-    dshot_pio::DshotPio<'static, PIO0>,
-    [pwm::PwmOutput<'static>; 2],
->;
+type Outputs =
+    fc::control::Outputs<1, 2, dshot_pio::DshotPio<'static, PIO0>, [pwm::PwmOutput<'static>; 2]>;
 
 type VtxUartTx = pio_uart::PioUartTx<'static, PIO1, 0>;
 type VtxUartRx = pio_uart::PioUartRx<'static, PIO1, 1>;
@@ -356,8 +352,6 @@ async fn main(thread_spawner: Spawner) -> ! {
     let realtime_spawner = REALTIME_EXECUTOR.start(interrupt::SWI_IRQ_0);
     let low_prio_spawner = LOW_PRIO_EXECUTOR.start(interrupt::SWI_IRQ_1);
 
-    info!("setup done. spawning tasks");
-
     realtime_spawner.spawn(task_reboot().unwrap());
 
     // This is realtime because it is doing blocking stuff in a critical section anyways
@@ -376,7 +370,7 @@ async fn main(thread_spawner: Spawner) -> ! {
     low_prio_spawner.spawn(task_receiver_channels_manager().unwrap());
     low_prio_spawner.spawn(task_receiver_read_crsf(receiver_uart_rx).unwrap());
     low_prio_spawner.spawn(task_receiver_telemetry_crsf(receiver_uart_tx).unwrap());
-    // #[cfg(feature = "defmt")]
+    // #[cfg(feature = "debug")]
     // low_prio_spawner.spawn(task_sensors_debug_log().unwrap());
     low_prio_spawner.spawn(task_status_led(led_driver).unwrap());
     low_prio_spawner.spawn(task_usb_interface(usb_driver).unwrap());
@@ -407,18 +401,18 @@ async fn main(thread_spawner: Spawner) -> ! {
             None
         }
     }
-    .and_then(|sd_card| toto_flight::black_box::Storage::new(sd_card).ok());
+    .and_then(|sd_card| fc::black_box::Storage::new(sd_card).ok());
 
-    #[cfg(feature = "cpu-usage")]
-    let mut cpu_usage_tracker = toto_flight::cpu_usage::Tracker::new(&mut _cp);
+    #[cfg(feature = "debug")]
+    let mut cpu_usage_tracker = fc::cpu_usage::Tracker::new(&mut _cp);
 
     loop {
         maybe_black_box.take_if(|black_box| black_box.poll().is_err());
 
-        #[cfg(feature = "cpu-usage")]
+        #[cfg(feature = "debug")]
         cpu_usage_tracker.on_idle(&mut _cp);
 
-        #[cfg(not(feature = "cpu-usage"))]
+        #[cfg(not(feature = "debug"))]
         cortex_m::asm::wfi();
     }
 }
@@ -426,9 +420,9 @@ async fn main(thread_spawner: Spawner) -> ! {
 #[embassy_executor::task]
 async fn task_reboot() {
     loop {
-        toto_flight::REBOOT.wait().await;
+        fc::REBOOT.wait().await;
         Timer::after(Duration::from_millis(100)).await;
-        if let Ok(_guard) = toto_flight::control::ArmBlocker::new() {
+        if let Ok(_guard) = fc::control::ArmBlocker::new() {
             info!("rebooting...");
             cortex_m::peripheral::SCB::sys_reset();
         } else {
@@ -439,96 +433,96 @@ async fn task_reboot() {
 
 #[embassy_executor::task]
 async fn task_config(flash: AsyncFlash, range: Range<u32>) {
-    toto_flight::config::task(flash, range).await;
+    fc::config::task(flash, range).await;
 }
 
 #[embassy_executor::task]
 async fn task_command_guardian() {
-    toto_flight::control::task_command_guardian().await;
+    fc::control::task_command_guardian().await;
 }
 
 #[embassy_executor::task]
 async fn task_control_inner_loop(outputs: Outputs) {
-    toto_flight::control::task_inner_loop(outputs).await;
+    fc::control::task_inner_loop(outputs).await;
 }
 
 #[embassy_executor::task]
 async fn task_control_outer_loop() {
-    toto_flight::control::task_outer_loop().await;
+    fc::control::task_outer_loop().await;
 }
 
 #[embassy_executor::task]
 async fn task_battery(battery_sensor: BatterySensor) {
-    toto_flight::sensors::battery::task(battery_sensor).await;
+    fc::sensors::battery::task(battery_sensor).await;
 }
 
 #[embassy_executor::task]
 async fn task_gps(uart_rx: uart::BufferedUartRx) {
-    toto_flight::sensors::gps::task(uart_rx).await;
+    fc::sensors::gps::task(uart_rx).await;
 }
 
 #[embassy_executor::task]
 async fn task_imu_interrupt_listener(pin: ImuInterruptPin) {
-    toto_flight::sensors::imu::task_interrupt_listener(pin).await;
+    fc::sensors::imu::task_interrupt_listener(pin).await;
 }
 
 #[embassy_executor::task]
 async fn task_imu_read(imu: ImuSensor) {
-    toto_flight::sensors::imu::task_read(imu).await;
+    fc::sensors::imu::task_read(imu).await;
 }
 
 #[embassy_executor::task]
 async fn task_imu_calibrate() {
-    toto_flight::sensors::imu::task_calibrate().await;
+    fc::sensors::imu::task_calibrate().await;
 }
 
 #[embassy_executor::task]
 async fn task_sensor_fusion() {
-    toto_flight::sensors::fusion::task().await;
+    fc::sensors::fusion::task().await;
 }
 
 #[embassy_executor::task]
 async fn task_receiver_read_crsf(uart_rx: uart::BufferedUartRx) {
-    toto_flight::receiver::task_read_crsf(uart_rx).await;
+    fc::receiver::task_read_crsf(uart_rx).await;
 }
 
 #[embassy_executor::task]
 async fn task_receiver_channels_manager() {
-    toto_flight::receiver::task_channels_manager().await;
+    fc::receiver::task_channels_manager().await;
 }
 
 #[embassy_executor::task]
 async fn task_receiver_telemetry_crsf(uart_tx: uart::BufferedUartTx) {
-    toto_flight::receiver::task_telemetry(uart_tx).await;
+    fc::receiver::task_telemetry(uart_tx).await;
 }
 
 #[embassy_executor::task]
 async fn task_vtx_msp_read(uart_rx: VtxUartRx) {
-    toto_flight::msp::task_read(uart_rx).await;
+    fc::msp::task_read(uart_rx).await;
 }
 
 #[embassy_executor::task]
 async fn task_vtx_msp_write(uart_tx: VtxUartTx) {
-    toto_flight::msp::task_write(uart_tx).await;
+    fc::msp::task_write(uart_tx).await;
 }
 
 #[embassy_executor::task]
 async fn task_usb_interface(usb_driver: UsbDriver) {
-    toto_flight::usb_interface::task(usb_driver).await;
+    fc::usb_interface::task(usb_driver).await;
 }
 
 #[embassy_executor::task]
 async fn task_status_led(led_driver: PioWs2812Driver) {
-    toto_flight::status_led::task(led_driver).await;
+    fc::status_led::task(led_driver).await;
 }
 
-#[cfg(feature = "defmt")]
+#[cfg(feature = "debug")]
 #[embassy_executor::task]
 async fn task_sensors_debug_log() {
-    toto_flight::sensors::debug_log::task().await;
+    fc::sensors::debug_log::task().await;
 }
 
-#[cfg(feature = "defmt")]
+#[cfg(feature = "debug")]
 #[defmt::panic_handler]
 fn panic() -> ! {
     cortex_m::asm::udf();

@@ -12,11 +12,11 @@
         "cargo": {
           "target": "thumbv8m.main-none-eabihf",
           "allTargets": false,
-          "features": ["defmt", "cpu-usage"],
         },
         "procMacro": {
           "enable": true,
         },
+        "linkedProjects": ["./boards/toto_plane/Cargo.toml", "./fc/Cargo.toml"],
       },
     },
   },

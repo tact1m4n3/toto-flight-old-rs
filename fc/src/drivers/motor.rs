@@ -1,5 +1,6 @@
 use embedded_hal::pwm::SetDutyCycle;
 
+#[cfg(feature = "rp")]
 pub mod dshot_pio;
 
 #[derive(Clone, Copy)]
