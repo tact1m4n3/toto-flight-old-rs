@@ -10,7 +10,7 @@ use uom::si::angular_velocity::{degree_per_second, radian_per_second};
 
 use crate::{
     RawMutex,
-    config::{self, MotorMixerConfig, RateControllerAxisConfig, ServoMixerConfig},
+    config::{self, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::{MotorOutput, ServoOutput},
     math::AngularVelocity3D,
     receiver, sensors,
@@ -112,7 +112,7 @@ pub async fn task_command_guardian() {
         SHARED_STATE.lock(|state| {
             let mut state = state.borrow_mut();
             state.failsafe = true;
-            state.arm_state = ArmState::Disarmed;
+            state.arm_state = ArmState::ArmFailed;
             state.command = Command::Disarmed;
         });
 
@@ -200,8 +200,6 @@ pub async fn task_command_guardian() {
 
 struct InnerLoopState<const MOTORS: usize, const SERVOS: usize> {
     rate_controller: RateController,
-
-    motor_mixer_config: [MotorMixerConfig; MOTORS],
     servo_mixer_config: [ServoMixerConfig; SERVOS],
 }
 
@@ -222,7 +220,6 @@ pub async fn task_inner_loop<
                 pitch: AxisRateController::new(cfg.rate_controller_config.pitch),
                 yaw: AxisRateController::new(cfg.rate_controller_config.yaw),
             },
-            motor_mixer_config: core::array::from_fn(|i| cfg.motors_config[i]),
             servo_mixer_config: core::array::from_fn(|i| cfg.servos_config[i]),
         });
 
@@ -272,7 +269,7 @@ pub async fn task_inner_loop<
 
                     if let Some(manual_control) = maybe_manual_control {
                         manual_control
-                            .mix(&state.motor_mixer_config, &state.servo_mixer_config)
+                            .mix(cfg.servo_max_throw_us, &state.servo_mixer_config)
                             .apply(&mut outputs);
                     }
                 }
@@ -417,8 +414,8 @@ struct AngleControl {
 
 impl AngleControl {
     fn target_rate(self, attitude: &UnitQuaternion<f32>) -> RateControl {
-        const ANGLE_ROLL_KP: f32 = 1.0;
-        const ANGLE_PITCH_KP: f32 = 1.0;
+        const ANGLE_ROLL_KP: f32 = 0.5;
+        const ANGLE_PITCH_KP: f32 = 0.5;
 
         let world_up = -Vector3::z();
         let body_up = attitude.inverse_transform_vector(&world_up);
@@ -481,21 +478,20 @@ struct ManualControl {
 impl ManualControl {
     fn mix<const MOTORS: usize, const SERVOS: usize>(
         self,
-        motors_cfg: &[MotorMixerConfig; MOTORS],
+        servo_max_throw_us: u16,
         servos_cfg: &[ServoMixerConfig; SERVOS],
     ) -> ActuatorOutput<MOTORS, SERVOS> {
         let Self { throttle, throw } = self;
 
         ActuatorOutput {
-            motors: core::array::from_fn(|i| {
-                throttle
-                    .wrapping_add_signed(throw.dot(&motors_cfg[i].mixer_gain) as i16)
-                    .clamp(motors_cfg[i].trim_min_us, motors_cfg[i].trim_max_us)
-            }),
+            motors: [throttle; MOTORS],
             servos: core::array::from_fn(|i| {
+                let servo_throw = throw.dot(&servos_cfg[i].mixer_gain) as i16;
+                let servo_throw =
+                    servo_throw.clamp(-(servo_max_throw_us as i16), servo_max_throw_us as i16);
                 servos_cfg[i]
                     .mid_point_us
-                    .wrapping_add_signed(throw.dot(&servos_cfg[i].mixer_gain) as i16)
+                    .wrapping_add_signed(servo_throw)
                     .clamp(servos_cfg[i].trim_min_us, servos_cfg[i].trim_max_us)
             }),
         }
@@ -528,7 +524,7 @@ impl AxisRateController {
     }
 
     fn update(&mut self, target_rate: f32, current_rate: f32, dt: f32) -> f32 {
-        const I_TERM_MAX_ERROR: f32 = 165.0;
+        const I_TERM_MAX_ERROR: f32 = 50.0;
 
         let error = target_rate - current_rate;
 

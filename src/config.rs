@@ -55,6 +55,7 @@ pub enum UpdateItem {
     ImuToBodyTransform(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
     MotorMixerConfig { index: u8, config: MotorMixerConfig },
+    ServoMaxThrow(u16),
     ServoMixerConfig { index: u8, config: ServoMixerConfig },
 }
 
@@ -82,6 +83,7 @@ pub struct Config {
     pub imu_to_body_transform: Matrix3<f32>,
     pub rate_controller_config: RateControllerConfig,
     pub motors_config: [MotorMixerConfig; MAX_MOTOR_OUTPUTS],
+    pub servo_max_throw_us: u16,
     pub servos_config: [ServoMixerConfig; MAX_SERVO_OUTPUTS],
 }
 
@@ -100,15 +102,17 @@ impl Config {
             trim_max_us: 2000,
             mixer_gain: Vector3::ZEROS,
         };
+
+        config.servo_max_throw_us = 200;
         config.servos_config[0] = ServoMixerConfig {
-            mid_point_us: 1600,
+            mid_point_us: 1700,
             trim_min_us: 1200,
-            trim_max_us: 1800,
+            trim_max_us: 1900,
             mixer_gain: Vector3::new(-1.0, -1.0, 0.0),
         };
         config.servos_config[1] = ServoMixerConfig {
-            mid_point_us: 1450,
-            trim_min_us: 1200,
+            mid_point_us: 1300,
+            trim_min_us: 1100,
             trim_max_us: 1800,
             mixer_gain: Vector3::new(-1.0, 1.0, 0.0),
         };
@@ -129,20 +133,21 @@ impl Default for Config {
             },
             imu_to_body_transform: Matrix3::identity(),
             rate_controller_config: RateControllerConfig {
+                i_term_limit: 50.0,
                 roll: RateControllerAxisConfig {
-                    kp: 7.0,
-                    ki: 10.0,
-                    kff: 50.0,
+                    kp: 0.5,
+                    ki: 0.8,
+                    kff: 2.0,
                 },
                 pitch: RateControllerAxisConfig {
-                    kp: 7.0,
-                    ki: 10.0,
-                    kff: 90.0,
+                    kp: 0.5,
+                    ki: 0.8,
+                    kff: 2.5,
                 },
                 yaw: RateControllerAxisConfig {
                     kp: 0.0,
                     ki: 0.0,
-                    kff: 40.0,
+                    kff: 1.5,
                 },
             },
             motors_config: [MotorMixerConfig {
@@ -150,6 +155,7 @@ impl Default for Config {
                 trim_max_us: 2000,
                 mixer_gain: Vector3::zeros(),
             }; MAX_MOTOR_OUTPUTS],
+            servo_max_throw_us: 500,
             servos_config: [ServoMixerConfig {
                 mid_point_us: 1500,
                 trim_min_us: 1000,
@@ -169,6 +175,7 @@ pub struct ImuCalibration {
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RateControllerConfig {
+    pub i_term_limit: f32,
     pub roll: RateControllerAxisConfig,
     pub pitch: RateControllerAxisConfig,
     pub yaw: RateControllerAxisConfig,
@@ -260,6 +267,13 @@ impl<F: NorFlash> Storage<F> {
                 self.raw_write(
                     &StorageKey::MotorConfig { index },
                     &StorageValue::MotorConfig(config),
+                )
+                .await?;
+            }
+            UpdateItem::ServoMaxThrow(servo_max_throw_us) => {
+                self.raw_write(
+                    &StorageKey::ServoMaxThrow,
+                    &StorageValue::ServoMaxThrow(servo_max_throw_us),
                 )
                 .await?;
             }
@@ -355,6 +369,7 @@ enum StorageKey {
     BoardToCraftTransform,
     RateControllerConfig,
     MotorConfig { index: u8 },
+    ServoMaxThrow,
     ServoConfig { index: u8 },
 }
 
@@ -384,6 +399,7 @@ enum StorageValue {
     BoardToCraftTransform(Matrix3<f32>),
     RateControllerConfig(RateControllerConfig),
     MotorConfig(MotorMixerConfig),
+    ServoMaxThrow(u16),
     ServoConfig(ServoMixerConfig),
 }
 
