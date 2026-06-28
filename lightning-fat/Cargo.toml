@@ -1,0 +1,20 @@
+[package]
+name = "lightning-fat"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+std = ["embedded-io-async/std"]
+
+[dependencies]
+bitflags = "2.13"
+embedded-io-async = "0.7.0"
+log = { version = "0.4", optional = true }
+defmt = { version = "1.1.0", optional = true }
+
+[dev-dependencies]
+embedded-io-adapters = { version = "0.7", package = "embedded-io-adapters", features = ["tokio-1"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+tokio-test = "0.4"
+
