@@ -1,4 +1,4 @@
-use core::{fmt::Display, ops::ControlFlow};
+use core::fmt::Display;
 
 use embedded_io_async::{Error, ErrorType, Read, ReadExactError, Seek, SeekFrom, Write};
 
@@ -154,20 +154,21 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         dir: &DirHandle,
         name: &ShortFileName,
     ) -> Result<bool, FsError<S::Error>> {
-        // iter dir to find
         let mut found = false;
-        self.iter_dir_entries_internal(dir, |_cluster, _offset, state| match state {
-            DirEntryState::Present(current_entry) => {
-                if current_entry.name == *name {
-                    found = true;
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
+        let mut it = DirEntryIterInternal::new(self, dir);
+        loop {
+            let (state, _, _) = it.next().await?;
+            match state {
+                DirEntryState::Present(dir_entry) => {
+                    if dir_entry.name == *name {
+                        found = true;
+                        break;
+                    }
                 }
+                DirEntryState::Deleted => (),
+                DirEntryState::Last => break,
             }
-            _ => ControlFlow::Continue(()),
-        })
-        .await?;
+        }
         Ok(found)
     }
 
@@ -176,21 +177,20 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         dir: &DirHandle,
         name: &ShortFileName,
     ) -> Result<DirEntry, FsError<S::Error>> {
-        if self.file_exists(dir, &name).await? {
+        if self.file_exists(dir, name).await? {
             return Err(FsError::FileAlreadyExists);
         }
 
-        let mut found_entry = None;
-        self
-            .iter_dir_entries_internal(dir, |cluster, offset, state| match state {
+        let mut it = DirEntryIterInternal::new(self, dir);
+        let (cluster, offset) = loop {
+            let (state, cluster, offset) = it.next().await?;
+            match state {
+                DirEntryState::Present(_) => (),
                 DirEntryState::Deleted | DirEntryState::Last => {
-                    found_entry = Some((cluster, offset));
-                    ControlFlow::Break(())
+                    break (cluster, offset);
                 }
-                _ => ControlFlow::Continue(()),
-            })
-            .await?;
-        let (cluster, offset) = found_entry.unwrap(); // there will always be a last entry
+            }
+        };
 
         // if we are about to override the last entry in the cluster, allocate another one. this
         // implicitely makes a new last entry (with the first byte zero)
@@ -226,40 +226,25 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         dir: &DirHandle,
         name: &ShortFileName,
     ) -> Result<DirEntry, FsError<S::Error>> {
-        let mut found_entry = None;
-        self.iter_dir_entries_internal(dir, |_cluster, _offset, state| {
-            if let DirEntryState::Present(entry) = state
-                && entry.name() == name
-            {
-                found_entry = Some(entry.clone());
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
+        let mut it = DirEntryIterInternal::new(self, dir);
+        loop {
+            let (state, _, _) = it.next().await?;
+            match state {
+                DirEntryState::Present(dir_entry) => {
+                    if dir_entry.name == *name {
+                        return Ok(dir_entry);
+                    }
+                }
+                DirEntryState::Deleted => (),
+                DirEntryState::Last => return Err(FsError::FileDoesNotExist),
             }
-        })
-        .await?;
-        found_entry.ok_or(FsError::FileDoesNotExist)
+        }
     }
 
-    pub async fn iter_dir<F: FnMut(&DirEntry) -> ControlFlow<()>>(
-        &mut self,
-        dir: &DirHandle,
-        mut f: F,
-    ) -> Result<(), FsError<S::Error>> {
-        self.iter_dir_entries_internal(dir, |_cluster, _offset, state| match state {
-            DirEntryState::Present(dir_entry) => {
-                if dir_entry.attr.contains(DirEntryAttr::LONG_NAME)
-                    || dir_entry.attr.contains(DirEntryAttr::VOLUME_ID)
-                {
-                    ControlFlow::Continue(())
-                } else {
-                    f(dir_entry)
-                }
-            }
-            _ => ControlFlow::Continue(()),
-        })
-        .await?;
-        Ok(())
+    pub fn iter_dir<'a>(&'a mut self, dir: &DirHandle) -> DirEntryIter<'a, S> {
+        DirEntryIter {
+            inner: DirEntryIterInternal::new(self, dir),
+        }
     }
 
     pub fn file_reader<'a>(
@@ -296,67 +281,6 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         match fat_entry {
             FatEntry::Next(next_cluster) => Ok(Some(next_cluster)),
             _ => Ok(None),
-        }
-    }
-
-    async fn iter_dir_entries_internal<F: FnMut(u32, u32, &DirEntryState) -> ControlFlow<()>>(
-        &mut self,
-        dir: &DirHandle,
-        mut f: F,
-    ) -> Result<(), FsError<S::Error>> {
-        let mut current_cluster = dir.start_cluster;
-        let mut current_cluster_offset = self.cluster_offset(current_cluster)?;
-        let mut offset_in_cluster = 0;
-
-        loop {
-            if offset_in_cluster >= self.cluster_size {
-                if let Some(next_cluster) = self.lookup_next_cluster(current_cluster).await? {
-                    current_cluster = next_cluster;
-                    current_cluster_offset = self.cluster_offset(current_cluster)?;
-                    offset_in_cluster = 0;
-                } else {
-                    return Err(FsError::InvalidFormat);
-                }
-            }
-
-            let dir_entry_offset = current_cluster_offset + offset_in_cluster as u64;
-
-            self.storage.seek(SeekFrom::Start(dir_entry_offset)).await?;
-
-            let mut data = [0u8; 32];
-            self.storage.read_exact(&mut data).await?;
-
-            let state = match data[0] {
-                0x00 => DirEntryState::Last,
-                0xE5 => DirEntryState::Deleted,
-                _ => {
-                    let attr = DirEntryAttr::from_bits_truncate(data[11]);
-                    let name = ShortFileName {
-                        raw: data[0..11].try_into().unwrap(),
-                    };
-
-                    let start_cluster =
-                        u32::from_le_bytes([data[26], data[27], data[20], data[21]]);
-                    let file_size = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
-
-                    DirEntryState::Present(DirEntry {
-                        name,
-                        attr,
-                        file_size,
-                        start_cluster,
-                    })
-                }
-            };
-
-            if matches!(
-                f(current_cluster, offset_in_cluster, &state),
-                ControlFlow::Break(()),
-            ) || matches!(state, DirEntryState::Last)
-            {
-                return Ok(());
-            }
-
-            offset_in_cluster += DIR_ENTRY_SIZE;
         }
     }
 
@@ -523,6 +447,89 @@ impl Display for ShortFileName {
         } else {
             write!(f, "{}", core::str::from_utf8(base_name).unwrap_or(""))
         }
+    }
+}
+
+pub struct DirEntryIter<'a, S: ReadWriteSeek> {
+    inner: DirEntryIterInternal<'a, S>,
+}
+
+impl<'a, S: ReadWriteSeek> DirEntryIter<'a, S> {
+    pub async fn next(&mut self) -> Result<Option<DirEntry>, FsError<S::Error>> {
+        loop {
+            match self.inner.next().await?.0 {
+                DirEntryState::Present(dir_entry) => {
+                    if !dir_entry.attr.contains(DirEntryAttr::LONG_NAME)
+                        && !dir_entry.attr.contains(DirEntryAttr::VOLUME_ID)
+                    {
+                        break Ok(Some(dir_entry));
+                    }
+                }
+                DirEntryState::Deleted => (),
+                DirEntryState::Last => break Ok(None),
+            }
+        }
+    }
+}
+
+struct DirEntryIterInternal<'a, S: ReadWriteSeek> {
+    fs: &'a mut FileSystem<S>,
+    current_cluster: u32,
+    offset_in_cluster: u32,
+}
+
+impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
+    fn new(fs: &'a mut FileSystem<S>, dir: &DirHandle) -> Self {
+        Self {
+            fs,
+            current_cluster: dir.start_cluster,
+            offset_in_cluster: 0,
+        }
+    }
+
+    async fn next(&mut self) -> Result<(DirEntryState, u32, u32), FsError<S::Error>> {
+        let current_cluster = self.current_cluster;
+        let offset_in_cluster = self.offset_in_cluster;
+
+        let dir_entry_offset = self.fs.cluster_offset(current_cluster)? + offset_in_cluster as u64;
+
+        self.fs
+            .storage
+            .seek(SeekFrom::Start(dir_entry_offset))
+            .await?;
+
+        let mut data = [0u8; 32];
+        self.fs.storage.read_exact(&mut data).await?;
+
+        let state = match data[0] {
+            0x00 => DirEntryState::Last,
+            0xE5 => DirEntryState::Deleted,
+            _ => DirEntryState::Present(DirEntry {
+                name: ShortFileName {
+                    raw: data[0..11].try_into().unwrap(),
+                },
+                attr: DirEntryAttr::from_bits_truncate(data[11]),
+                file_size: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
+                start_cluster: ((u16::from_le_bytes([data[20], data[21]]) as u32) << 16)
+                    | u16::from_le_bytes([data[26], data[27]]) as u32,
+            }),
+        };
+
+        // if not the last entry, we advance
+        if !matches!(state, DirEntryState::Last) {
+            self.offset_in_cluster += DIR_ENTRY_SIZE;
+
+            if self.offset_in_cluster >= self.fs.cluster_size {
+                if let Some(next_cluster) = self.fs.lookup_next_cluster(current_cluster).await? {
+                    self.current_cluster = next_cluster;
+                    self.offset_in_cluster = 0;
+                } else {
+                    return Err(FsError::InvalidFormat);
+                }
+            }
+        }
+
+        Ok((state, current_cluster, offset_in_cluster))
     }
 }
 

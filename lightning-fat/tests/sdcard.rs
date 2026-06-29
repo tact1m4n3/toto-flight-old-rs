@@ -24,23 +24,20 @@ pub async fn test_sdcard() {
     let mut fs = FileSystem::new(&mut file).await.unwrap();
     let root = fs.root_dir();
 
-    for i in 0..128 {
-        let name = format!("{}.txt", i);
-        let file = fs.create_file(&root, &ShortFileName::new(name.as_bytes()).unwrap()).await.unwrap();
-
-    }
+    // for i in 0..128 {
+    //     let name = format!("{}.txt", i);
+    //     let file = fs.create_file(&root, &ShortFileName::new(name.as_bytes()).unwrap()).await.unwrap();
+    //
+    // }
     // let file = fs
     //     .open_file(root, ShortFileName::new(b"hello.txt").unwrap())
     //     .await
     //     .unwrap();
 
-    fs.iter_dir(&root, |e| {
-        println!("Entry: {}", e.name());
-        // entry = Some(e.clone());
-        ControlFlow::Continue(())
-    })
-    .await
-    .unwrap();
+    let mut it = fs.iter_dir(&root);
+    while let Some(dir_entry) = it.next().await.unwrap() {
+        println!("Entry: {} {:X}", dir_entry.name(), dir_entry.size());
+    }
 
     // let mut reader = fs.file_reader(&file).unwrap();
     // let mut buf = [0u8; 20];
