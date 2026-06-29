@@ -3,6 +3,7 @@ use core::{fmt::Display, ops::ControlFlow};
 use embedded_io_async::{Error, ErrorType, Read, ReadExactError, Seek, SeekFrom, Write};
 
 pub const SECTOR_SIZE: u32 = 512;
+pub const DIR_ENTRY_SIZE: u32 = 32;
 
 #[derive(Debug)]
 pub enum FsError<E> {
@@ -11,7 +12,9 @@ pub enum FsError<E> {
     InvalidCluster,
     EntryIsDirectory,
     UnexpectedEof,
-    ZeroRead,
+    FileAlreadyExists,
+    FileDoesNotExist,
+    OutOfSpace,
 }
 impl<E: Error> From<E> for FsError<E> {
     fn from(e: E) -> Self {
@@ -34,7 +37,9 @@ impl<E: Error> Display for FsError<E> {
             FsError::InvalidCluster => write!(f, "Invalid cluster"),
             FsError::EntryIsDirectory => write!(f, "Entry is a directory"),
             FsError::UnexpectedEof => write!(f, "Unexpected end of file"),
-            FsError::ZeroRead => write!(f, "Zero bytes read"),
+            FsError::FileAlreadyExists => write!(f, "File already exists"),
+            FsError::FileDoesNotExist => write!(f, "File does not exist"),
+            FsError::OutOfSpace => write!(f, "Out of space"),
         }
     }
 }
@@ -43,11 +48,7 @@ impl<E: Error> Error for FsError<E> {
     fn kind(&self) -> embedded_io_async::ErrorKind {
         match self {
             FsError::Io(e) => e.kind(),
-            FsError::InvalidFormat => embedded_io_async::ErrorKind::Other,
-            FsError::InvalidCluster => embedded_io_async::ErrorKind::Other,
-            FsError::EntryIsDirectory => embedded_io_async::ErrorKind::Other,
-            FsError::UnexpectedEof => embedded_io_async::ErrorKind::Other,
-            FsError::ZeroRead => embedded_io_async::ErrorKind::Other,
+            _ => embedded_io_async::ErrorKind::Other,
         }
     }
 }
@@ -61,21 +62,24 @@ pub struct FileSystem<S: ReadWriteSeek> {
     fat: FileAllocationTable,
     first_cluster_offset: u64,
     cluster_size: u32,
+    total_clusters: u32,
 }
 
 impl<S: ReadWriteSeek> FileSystem<S> {
     pub async fn new(mut storage: S) -> Result<Self, FsError<S::Error>> {
+        // TODO: check signatures
+
         const MBR_OFFSET_PARTITION_1_ENTRY: u64 = 446;
-        storage
-            .seek(SeekFrom::Start(MBR_OFFSET_PARTITION_1_ENTRY))
-            .await?;
         let partition_entry = {
             let mut data = [0u8; 16];
+            storage
+                .seek(SeekFrom::Start(MBR_OFFSET_PARTITION_1_ENTRY))
+                .await?;
             storage.read_exact(&mut data).await?;
             PartitionEntry {
                 typ: data[4],
                 starting_lba: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
-                size_in_sectors: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+                // size_in_sectors: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
             }
         };
         if partition_entry.typ != 0x0C {
@@ -83,10 +87,10 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         }
 
         let partition_offset = partition_entry.starting_lba as u64 * SECTOR_SIZE as u64;
-        storage.seek(SeekFrom::Start(partition_offset)).await?;
 
         let boot_sector = {
             let mut data = [0u8; 50];
+            storage.seek(SeekFrom::Start(partition_offset)).await?;
             storage.read_exact(&mut data).await?;
             BootSector {
                 bytes_per_sector: u16::from_le_bytes([data[11], data[12]]),
@@ -104,6 +108,18 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         if boot_sector.bytes_per_sector as u32 != SECTOR_SIZE {
             return Err(FsError::InvalidFormat);
         }
+
+        let fs_info_offset =
+            partition_offset + boot_sector.fs_info_sector as u64 * SECTOR_SIZE as u64;
+
+        let total_clusters = boot_sector.total_sectors / boot_sector.sectors_per_cluster as u32;
+
+        // Reset fs info so that we don't have to worry about it being out of date.
+        const FS_INFO_DATA_OFFSET: u64 = 488;
+        storage
+            .seek(SeekFrom::Start(fs_info_offset + FS_INFO_DATA_OFFSET))
+            .await?;
+        storage.write_all(&[0xFF; 8]).await?;
 
         let fat = FileAllocationTable {
             offset: partition_offset + boot_sector.reserved_sectors as u64 * SECTOR_SIZE as u64,
@@ -123,81 +139,133 @@ impl<S: ReadWriteSeek> FileSystem<S> {
             fat,
             cluster_size,
             first_cluster_offset,
+            total_clusters,
         })
     }
 
-    pub fn root_dir(&self) -> RawDirectory {
-        RawDirectory {
+    pub fn root_dir(&self) -> DirHandle {
+        DirHandle {
             start_cluster: self.boot_sector.root_directory_cluster,
         }
     }
 
-    pub async fn iter_dir<F: FnMut(&DirEntry) -> ControlFlow<()>>(
+    pub async fn file_exists(
         &mut self,
-        dir: &RawDirectory,
-        mut f: F,
-    ) -> Result<(), FsError<S::Error>> {
-        let mut current_cluster = dir.start_cluster;
-        let mut current_cluster_offset = self.cluster_offset(current_cluster)?;
-        let mut offset_in_cluster = 0;
-
-        loop {
-            if offset_in_cluster >= self.cluster_size {
-                if let Some(next_cluster) = self.find_next_cluster(current_cluster).await? {
-                    current_cluster = next_cluster;
-                    current_cluster_offset = self.cluster_offset(current_cluster)?;
-                    offset_in_cluster = 0;
+        dir: &DirHandle,
+        name: &ShortFileName,
+    ) -> Result<bool, FsError<S::Error>> {
+        // iter dir to find
+        let mut found = false;
+        self.iter_dir_entries_internal(dir, |_cluster, _offset, state| match state {
+            DirEntryState::Present(current_entry) => {
+                if current_entry.name == *name {
+                    found = true;
+                    ControlFlow::Break(())
                 } else {
-                    break;
+                    ControlFlow::Continue(())
                 }
             }
+            _ => ControlFlow::Continue(()),
+        })
+        .await?;
+        Ok(found)
+    }
 
-            self.storage
-                .seek(SeekFrom::Start(
-                    current_cluster_offset + offset_in_cluster as u64,
-                ))
-                .await?;
-            offset_in_cluster += 32;
-
-            let mut data = [0u8; 32];
-            self.storage.read_exact(&mut data).await?;
-
-            if data[0] == 0x00 {
-                break;
-            }
-
-            if data[0] == 0xE5 {
-                continue;
-            }
-
-            let attr = DirEntryAttr::from_bits_truncate(data[11]);
-            if attr.contains(DirEntryAttr::LONG_NAME) {
-                continue;
-            }
-
-            let name: [u8; 11] = data[0..11].try_into().unwrap();
-            let start_cluster = u32::from_le_bytes([data[26], data[27], data[20], data[21]]);
-            let file_size = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
-
-            let dir_entry = DirEntry {
-                name,
-                attr,
-                file_size,
-                start_cluster,
-            };
-
-            if let ControlFlow::Break(()) = f(&dir_entry) {
-                break;
-            }
+    pub async fn create_file(
+        &mut self,
+        dir: &DirHandle,
+        name: &ShortFileName,
+    ) -> Result<DirEntry, FsError<S::Error>> {
+        if self.file_exists(dir, &name).await? {
+            return Err(FsError::FileAlreadyExists);
         }
 
+        let mut found_entry = None;
+        self
+            .iter_dir_entries_internal(dir, |cluster, offset, state| match state {
+                DirEntryState::Deleted | DirEntryState::Last => {
+                    found_entry = Some((cluster, offset));
+                    ControlFlow::Break(())
+                }
+                _ => ControlFlow::Continue(()),
+            })
+            .await?;
+        let (cluster, offset) = found_entry.unwrap(); // there will always be a last entry
+
+        // if we are about to override the last entry in the cluster, allocate another one. this
+        // implicitely makes a new last entry (with the first byte zero)
+        if offset + DIR_ENTRY_SIZE >= self.cluster_size {
+            let next_cluster = self.alloc_chained_cluster(cluster).await?;
+            self.zero_cluster(next_cluster).await?;
+        }
+
+        let dir_entry = DirEntry {
+            name: name.clone(),
+            attr: DirEntryAttr::ARCHIVE,
+            file_size: 0,
+            start_cluster: 0,
+        };
+
+        let mut data = [0u8; DIR_ENTRY_SIZE as usize];
+        data[0..11].copy_from_slice(&dir_entry.name.raw);
+        data[11] = dir_entry.attr.bits();
+        data[20..22].copy_from_slice(&dir_entry.start_cluster.to_le_bytes()[2..]);
+        data[26..28].copy_from_slice(&dir_entry.start_cluster.to_le_bytes()[..2]);
+        data[28..32].copy_from_slice(&dir_entry.file_size.to_le_bytes());
+
+        let dir_entry_offset = self.cluster_offset(cluster)? + offset as u64;
+        self.storage.seek(SeekFrom::Start(dir_entry_offset)).await?;
+        self.storage.write_all(&data).await?;
+        self.storage.flush().await?;
+
+        Ok(dir_entry)
+    }
+
+    pub async fn open_file(
+        &mut self,
+        dir: &DirHandle,
+        name: &ShortFileName,
+    ) -> Result<DirEntry, FsError<S::Error>> {
+        let mut found_entry = None;
+        self.iter_dir_entries_internal(dir, |_cluster, _offset, state| {
+            if let DirEntryState::Present(entry) = state
+                && entry.name() == name
+            {
+                found_entry = Some(entry.clone());
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .await?;
+        found_entry.ok_or(FsError::FileDoesNotExist)
+    }
+
+    pub async fn iter_dir<F: FnMut(&DirEntry) -> ControlFlow<()>>(
+        &mut self,
+        dir: &DirHandle,
+        mut f: F,
+    ) -> Result<(), FsError<S::Error>> {
+        self.iter_dir_entries_internal(dir, |_cluster, _offset, state| match state {
+            DirEntryState::Present(dir_entry) => {
+                if dir_entry.attr.contains(DirEntryAttr::LONG_NAME)
+                    || dir_entry.attr.contains(DirEntryAttr::VOLUME_ID)
+                {
+                    ControlFlow::Continue(())
+                } else {
+                    f(dir_entry)
+                }
+            }
+            _ => ControlFlow::Continue(()),
+        })
+        .await?;
         Ok(())
     }
 
-    pub fn file_reader(
-        &mut self,
+    pub fn file_reader<'a>(
+        &'a mut self,
         entry: &DirEntry,
-    ) -> Result<FileReader<'_, S>, FsError<S::Error>> {
+    ) -> Result<FileReader<'a, S>, FsError<S::Error>> {
         if entry.is_directory() {
             return Err(FsError::EntryIsDirectory);
         }
@@ -210,43 +278,166 @@ impl<S: ReadWriteSeek> FileSystem<S> {
     }
 
     fn cluster_offset(&self, cluster: u32) -> Result<u64, FsError<S::Error>> {
-        if cluster < 2 {
+        if cluster < 2 || cluster >= self.total_clusters + 2 {
             return Err(FsError::InvalidCluster);
         }
         Ok(self.first_cluster_offset + (cluster as u64 - 2) * self.cluster_size as u64)
     }
 
-    async fn find_next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, FsError<S::Error>> {
+    async fn lookup_next_cluster(
+        &mut self,
+        cluster: u32,
+    ) -> Result<Option<u32>, FsError<S::Error>> {
         let fat_entry_offset = self.fat.offset + cluster as u64 * 4;
         self.storage.seek(SeekFrom::Start(fat_entry_offset)).await?;
         let mut buf = [0u8; 4];
         self.storage.read_exact(&mut buf).await?;
-        let next_cluster = u32::from_le_bytes(buf);
-        if next_cluster >= 0x0FFFFFF8 {
-            return Ok(None);
+        let fat_entry = FatEntry::new(u32::from_le_bytes(buf));
+        match fat_entry {
+            FatEntry::Next(next_cluster) => Ok(Some(next_cluster)),
+            _ => Ok(None),
         }
-        let next_cluster = next_cluster & 0x0FFFFFFF;
-        if next_cluster < 2 {
-            return Err(FsError::InvalidCluster);
+    }
+
+    async fn iter_dir_entries_internal<F: FnMut(u32, u32, &DirEntryState) -> ControlFlow<()>>(
+        &mut self,
+        dir: &DirHandle,
+        mut f: F,
+    ) -> Result<(), FsError<S::Error>> {
+        let mut current_cluster = dir.start_cluster;
+        let mut current_cluster_offset = self.cluster_offset(current_cluster)?;
+        let mut offset_in_cluster = 0;
+
+        loop {
+            if offset_in_cluster >= self.cluster_size {
+                if let Some(next_cluster) = self.lookup_next_cluster(current_cluster).await? {
+                    current_cluster = next_cluster;
+                    current_cluster_offset = self.cluster_offset(current_cluster)?;
+                    offset_in_cluster = 0;
+                } else {
+                    return Err(FsError::InvalidFormat);
+                }
+            }
+
+            let dir_entry_offset = current_cluster_offset + offset_in_cluster as u64;
+
+            self.storage.seek(SeekFrom::Start(dir_entry_offset)).await?;
+
+            let mut data = [0u8; 32];
+            self.storage.read_exact(&mut data).await?;
+
+            let state = match data[0] {
+                0x00 => DirEntryState::Last,
+                0xE5 => DirEntryState::Deleted,
+                _ => {
+                    let attr = DirEntryAttr::from_bits_truncate(data[11]);
+                    let name = ShortFileName {
+                        raw: data[0..11].try_into().unwrap(),
+                    };
+
+                    let start_cluster =
+                        u32::from_le_bytes([data[26], data[27], data[20], data[21]]);
+                    let file_size = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
+
+                    DirEntryState::Present(DirEntry {
+                        name,
+                        attr,
+                        file_size,
+                        start_cluster,
+                    })
+                }
+            };
+
+            if matches!(
+                f(current_cluster, offset_in_cluster, &state),
+                ControlFlow::Break(()),
+            ) || matches!(state, DirEntryState::Last)
+            {
+                return Ok(());
+            }
+
+            offset_in_cluster += DIR_ENTRY_SIZE;
         }
-        Ok(Some(next_cluster))
+    }
+
+    async fn alloc_chained_cluster(&mut self, prev_cluster: u32) -> Result<u32, FsError<S::Error>> {
+        let mut free_cluster = None;
+
+        self.storage
+            .seek(SeekFrom::Start(self.fat.offset + 8))
+            .await?; // skip first two entries (reserved)
+
+        for cluster in 2..self.fat.entries_count {
+            let mut buf = [0u8; 4];
+            self.storage.read_exact(&mut buf).await?;
+
+            let entry = FatEntry::new(u32::from_le_bytes(buf));
+            if let FatEntry::Free = entry {
+                free_cluster = Some(cluster);
+                break;
+            }
+        }
+
+        if let Some(next_cluster) = free_cluster {
+            for fat_id in 0..self.fat.copies {
+                let offset = self.fat.offset
+                    + fat_id as u64 * self.boot_sector.sectors_per_fat as u64 * SECTOR_SIZE as u64;
+                self.storage
+                    .seek(SeekFrom::Start(offset + 4 * next_cluster as u64))
+                    .await?;
+                self.storage
+                    .write_all(&FatEntry::EndOfChain.raw().to_le_bytes())
+                    .await?;
+                self.storage
+                    .seek(SeekFrom::Start(offset + 4 * prev_cluster as u64))
+                    .await?;
+                self.storage
+                    .write_all(&FatEntry::Next(next_cluster).raw().to_le_bytes())
+                    .await?;
+            }
+            self.storage.flush().await?;
+            Ok(next_cluster)
+        } else {
+            Err(FsError::OutOfSpace)
+        }
+    }
+
+    async fn zero_cluster(&mut self, cluster: u32) -> Result<(), FsError<S::Error>> {
+        let mut offset = self.cluster_offset(cluster)?;
+        let buf = [0u8; 64];
+        let end_offset = offset + self.cluster_size as u64;
+
+        self.storage.seek(SeekFrom::Start(offset)).await?;
+        while offset < end_offset {
+            self.storage.write_all(&buf).await?;
+            offset += buf.len() as u64;
+        }
+        Ok(())
     }
 }
 
-pub struct RawDirectory {
+#[derive(Clone, Debug)]
+pub struct DirHandle {
     start_cluster: u32,
 }
 
 #[derive(Clone, Debug)]
+enum DirEntryState {
+    Present(DirEntry),
+    Deleted,
+    Last,
+}
+
+#[derive(Clone, Debug)]
 pub struct DirEntry {
-    name: [u8; 11],
+    name: ShortFileName,
     attr: DirEntryAttr,
     file_size: u32,
     start_cluster: u32,
 }
 
 impl DirEntry {
-    pub fn name(&self) -> &[u8; 11] {
+    pub fn name(&self) -> &ShortFileName {
         &self.name
     }
 
@@ -276,6 +467,65 @@ bitflags::bitflags! {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortFileName {
+    raw: [u8; 11],
+}
+
+impl ShortFileName {
+    pub fn new(name: &[u8]) -> Option<Self> {
+        let dot_pos = name.iter().rposition(|&x| x == b'.');
+
+        let (name_part, ext_part) = match dot_pos {
+            Some(pos) => (&name[..pos], &name[pos + 1..]),
+            None => (name, &b""[..]),
+        };
+
+        if name_part.is_empty() || name_part.len() > 8 || ext_part.len() > 3 {
+            return None;
+        }
+
+        let mut raw = [b' '; 11];
+        raw[..name_part.len()].copy_from_slice(name_part);
+        raw[8..][..ext_part.len()].copy_from_slice(ext_part);
+        raw.make_ascii_uppercase();
+        Some(Self { raw })
+    }
+
+    pub fn base_name(&self) -> &[u8] {
+        let name_len = self.raw[0..8]
+            .iter()
+            .rposition(|x| *x != b' ')
+            .map_or(0, |p| p + 1);
+        &self.raw[..name_len]
+    }
+
+    pub fn ext(&self) -> &[u8] {
+        let ext_len = self.raw[8..11]
+            .iter()
+            .rposition(|x| *x != b' ')
+            .map_or(0, |p| p + 1);
+        &self.raw[8..][..ext_len]
+    }
+}
+
+impl Display for ShortFileName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let base_name = self.base_name();
+        let ext = self.ext();
+        if !ext.is_empty() {
+            write!(
+                f,
+                "{}.{}",
+                core::str::from_utf8(base_name).unwrap_or(""),
+                core::str::from_utf8(ext).unwrap_or("")
+            )
+        } else {
+            write!(f, "{}", core::str::from_utf8(base_name).unwrap_or(""))
+        }
+    }
+}
+
 pub struct FileReader<'a, S: ReadWriteSeek> {
     fs: &'a mut FileSystem<S>,
     current_cluster: u32,
@@ -298,7 +548,7 @@ impl<'a, S: ReadWriteSeek> Read for FileReader<'a, S> {
 
         while read_until_now < read_amount {
             if self.offset_in_cluster >= self.fs.cluster_size {
-                match self.fs.find_next_cluster(self.current_cluster).await? {
+                match self.fs.lookup_next_cluster(self.current_cluster).await? {
                     Some(next) => {
                         self.current_cluster = next;
                         self.offset_in_cluster = 0;
@@ -333,7 +583,6 @@ impl<'a, S: ReadWriteSeek> Read for FileReader<'a, S> {
 struct PartitionEntry {
     typ: u8,
     starting_lba: u32,
-    size_in_sectors: u32,
 }
 
 #[derive(Debug)]
@@ -352,4 +601,31 @@ struct FileAllocationTable {
     offset: u64,
     entries_count: u32,
     copies: u8,
+}
+
+enum FatEntry {
+    Free,
+    Next(u32),
+    EndOfChain,
+    BadCluster,
+}
+
+impl FatEntry {
+    pub fn new(value: u32) -> Self {
+        match value {
+            0x00000000 => FatEntry::Free,
+            0x0FFFFFF8..=0x0FFFFFFF => FatEntry::EndOfChain,
+            0x0FFFFFF7 => FatEntry::BadCluster,
+            _ => FatEntry::Next(value & 0x0FFFFFFF),
+        }
+    }
+
+    pub fn raw(self) -> u32 {
+        match self {
+            FatEntry::Free => 0x00000000,
+            FatEntry::Next(cluster) => cluster & 0x0FFFFFFF,
+            FatEntry::EndOfChain => 0x0FFFFFFF,
+            FatEntry::BadCluster => 0x0FFFFFF7,
+        }
+    }
 }
