@@ -9,7 +9,6 @@ pub const DIR_ENTRY_SIZE: u32 = 32;
 pub enum FsError<E> {
     Io(E),
     InvalidFormat,
-    InvalidCluster,
     EntryIsDirectory,
     UnexpectedEof,
     FileAlreadyExists,
@@ -34,7 +33,6 @@ impl<E: Error> Display for FsError<E> {
         match self {
             FsError::Io(e) => write!(f, "I/O error: {}", e),
             FsError::InvalidFormat => write!(f, "Invalid format"),
-            FsError::InvalidCluster => write!(f, "Invalid cluster"),
             FsError::EntryIsDirectory => write!(f, "Entry is a directory"),
             FsError::UnexpectedEof => write!(f, "Unexpected end of file"),
             FsError::FileAlreadyExists => write!(f, "File already exists"),
@@ -67,7 +65,7 @@ pub struct FileSystem<S: ReadWriteSeek> {
 
 impl<S: ReadWriteSeek> FileSystem<S> {
     pub async fn new(mut storage: S) -> Result<Self, FsError<S::Error>> {
-        // TODO: check signatures
+        // TODO: check signatures: MBR, BS, FAT32 OEM, etc.
 
         const MBR_OFFSET_PARTITION_1_ENTRY: u64 = 446;
         let partition_entry = {
@@ -112,8 +110,6 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         let fs_info_offset =
             partition_offset + boot_sector.fs_info_sector as u64 * SECTOR_SIZE as u64;
 
-        let total_clusters = boot_sector.total_sectors / boot_sector.sectors_per_cluster as u32;
-
         // Reset fs info so that we don't have to worry about it being out of date.
         const FS_INFO_DATA_OFFSET: u64 = 488;
         storage
@@ -132,6 +128,11 @@ impl<S: ReadWriteSeek> FileSystem<S> {
             + boot_sector.number_of_fats as u64
                 * boot_sector.sectors_per_fat as u64
                 * SECTOR_SIZE as u64;
+
+        let total_clusters = (boot_sector.total_sectors
+            - boot_sector.reserved_sectors as u32
+            - fat.copies as u32 * boot_sector.sectors_per_fat)
+            / boot_sector.sectors_per_cluster as u32;
 
         Ok(Self {
             storage,
@@ -155,18 +156,11 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         name: &ShortFileName,
     ) -> Result<bool, FsError<S::Error>> {
         let mut found = false;
-        let mut it = DirEntryIterInternal::new(self, dir);
-        loop {
-            let (state, _, _) = it.next().await?;
-            match state {
-                DirEntryState::Present(dir_entry) => {
-                    if dir_entry.name == *name {
-                        found = true;
-                        break;
-                    }
-                }
-                DirEntryState::Deleted => (),
-                DirEntryState::Last => break,
+        let mut it = self.iter_dir(dir);
+        while let Some(dir_entry) = it.next().await? {
+            if dir_entry.name == *name {
+                found = true;
+                break;
             }
         }
         Ok(found)
@@ -181,23 +175,27 @@ impl<S: ReadWriteSeek> FileSystem<S> {
             return Err(FsError::FileAlreadyExists);
         }
 
+        let mut unused_entry_location = None;
+
         let mut it = DirEntryIterInternal::new(self, dir);
-        let (cluster, offset) = loop {
-            let (state, cluster, offset) = it.next().await?;
+        while let Some(state) = it.next().await? {
             match state {
                 DirEntryState::Present(_) => (),
-                DirEntryState::Deleted | DirEntryState::Last => {
-                    break (cluster, offset);
-                }
+                DirEntryState::Unused(location) => {
+                    unused_entry_location = Some(location);
+                },
             }
-        };
-
-        // if we are about to override the last entry in the cluster, allocate another one. this
-        // implicitely makes a new last entry (with the first byte zero)
-        if offset + DIR_ENTRY_SIZE >= self.cluster_size {
-            let next_cluster = self.alloc_chained_cluster(cluster).await?;
-            self.zero_cluster(next_cluster).await?;
         }
+
+        let (cluster, offset) = if let Some(location) = unused_entry_location {
+            location
+        } else {
+            let last_cluster = it.current_cluster;
+            let next_cluster = self.alloc_chained_cluster(last_cluster).await?;
+            self.zero_cluster(next_cluster).await?;
+            (next_cluster, 0)
+        };
+        let dir_entry_offset = self.cluster_offset(cluster)? + offset as u64;
 
         let dir_entry = DirEntry {
             name: name.clone(),
@@ -209,11 +207,8 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         let mut data = [0u8; DIR_ENTRY_SIZE as usize];
         data[0..11].copy_from_slice(&dir_entry.name.raw);
         data[11] = dir_entry.attr.bits();
-        data[20..22].copy_from_slice(&dir_entry.start_cluster.to_le_bytes()[2..]);
-        data[26..28].copy_from_slice(&dir_entry.start_cluster.to_le_bytes()[..2]);
-        data[28..32].copy_from_slice(&dir_entry.file_size.to_le_bytes());
+        // the rest of the fields are zero on creation
 
-        let dir_entry_offset = self.cluster_offset(cluster)? + offset as u64;
         self.storage.seek(SeekFrom::Start(dir_entry_offset)).await?;
         self.storage.write_all(&data).await?;
         self.storage.flush().await?;
@@ -226,19 +221,13 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         dir: &DirHandle,
         name: &ShortFileName,
     ) -> Result<DirEntry, FsError<S::Error>> {
-        let mut it = DirEntryIterInternal::new(self, dir);
-        loop {
-            let (state, _, _) = it.next().await?;
-            match state {
-                DirEntryState::Present(dir_entry) => {
-                    if dir_entry.name == *name {
-                        return Ok(dir_entry);
-                    }
-                }
-                DirEntryState::Deleted => (),
-                DirEntryState::Last => return Err(FsError::FileDoesNotExist),
+        let mut it = self.iter_dir(dir);
+        while let Some(dir_entry) = it.next().await? {
+            if dir_entry.name == *name {
+                return Ok(dir_entry);
             }
         }
+        Err(FsError::FileDoesNotExist)
     }
 
     pub fn iter_dir<'a>(&'a mut self, dir: &DirHandle) -> DirEntryIter<'a, S> {
@@ -264,7 +253,7 @@ impl<S: ReadWriteSeek> FileSystem<S> {
 
     fn cluster_offset(&self, cluster: u32) -> Result<u64, FsError<S::Error>> {
         if cluster < 2 || cluster >= self.total_clusters + 2 {
-            return Err(FsError::InvalidCluster);
+            return Err(FsError::InvalidFormat);
         }
         Ok(self.first_cluster_offset + (cluster as u64 - 2) * self.cluster_size as u64)
     }
@@ -285,10 +274,13 @@ impl<S: ReadWriteSeek> FileSystem<S> {
     }
 
     async fn alloc_chained_cluster(&mut self, prev_cluster: u32) -> Result<u32, FsError<S::Error>> {
+        // TODO: use FS INFO Nxt_Free to not search from the beginning
+        // TODO: prev cluster not checked for being greater than two
+
         let mut free_cluster = None;
 
         self.storage
-            .seek(SeekFrom::Start(self.fat.offset + 8))
+            .seek(SeekFrom::Start(self.fat.offset + 2 * 4))
             .await?; // skip first two entries (reserved)
 
         for cluster in 2..self.fat.entries_count {
@@ -328,14 +320,18 @@ impl<S: ReadWriteSeek> FileSystem<S> {
 
     async fn zero_cluster(&mut self, cluster: u32) -> Result<(), FsError<S::Error>> {
         let mut offset = self.cluster_offset(cluster)?;
-        let buf = [0u8; 64];
         let end_offset = offset + self.cluster_size as u64;
 
+        // NOTE: assumes self.cluster_size % buf.len() == 0, which is true if the format is ok
+
         self.storage.seek(SeekFrom::Start(offset)).await?;
+
+        let buf = [0u8; 64];
         while offset < end_offset {
             self.storage.write_all(&buf).await?;
             offset += buf.len() as u64;
         }
+        self.storage.flush().await?;
         Ok(())
     }
 }
@@ -345,13 +341,7 @@ pub struct DirHandle {
     start_cluster: u32,
 }
 
-#[derive(Clone, Debug)]
-enum DirEntryState {
-    Present(DirEntry),
-    Deleted,
-    Last,
-}
-
+// TODO: store global offset
 #[derive(Clone, Debug)]
 pub struct DirEntry {
     name: ShortFileName,
@@ -398,7 +388,9 @@ pub struct ShortFileName {
 
 impl ShortFileName {
     pub fn new(name: &[u8]) -> Option<Self> {
-        let dot_pos = name.iter().rposition(|&x| x == b'.');
+        // TODO: name validation
+
+        let dot_pos = name.iter().position(|&x| x == b'.');
 
         let (name_part, ext_part) = match dot_pos {
             Some(pos) => (&name[..pos], &name[pos + 1..]),
@@ -412,7 +404,6 @@ impl ShortFileName {
         let mut raw = [b' '; 11];
         raw[..name_part.len()].copy_from_slice(name_part);
         raw[8..][..ext_part.len()].copy_from_slice(ext_part);
-        raw.make_ascii_uppercase();
         Some(Self { raw })
     }
 
@@ -456,20 +447,26 @@ pub struct DirEntryIter<'a, S: ReadWriteSeek> {
 
 impl<'a, S: ReadWriteSeek> DirEntryIter<'a, S> {
     pub async fn next(&mut self) -> Result<Option<DirEntry>, FsError<S::Error>> {
-        loop {
-            match self.inner.next().await?.0 {
+        while let Some(state) = self.inner.next().await? {
+            match state {
                 DirEntryState::Present(dir_entry) => {
                     if !dir_entry.attr.contains(DirEntryAttr::LONG_NAME)
                         && !dir_entry.attr.contains(DirEntryAttr::VOLUME_ID)
                     {
-                        break Ok(Some(dir_entry));
+                        return Ok(Some(dir_entry));
                     }
                 }
-                DirEntryState::Deleted => (),
-                DirEntryState::Last => break Ok(None),
+                DirEntryState::Unused(_) => (),
             }
         }
+        Ok(None)
     }
+}
+
+#[derive(Clone, Debug)]
+enum DirEntryState {
+    Present(DirEntry),
+    Unused((u32, u32)),
 }
 
 struct DirEntryIterInternal<'a, S: ReadWriteSeek> {
@@ -487,11 +484,9 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
         }
     }
 
-    async fn next(&mut self) -> Result<(DirEntryState, u32, u32), FsError<S::Error>> {
-        let current_cluster = self.current_cluster;
-        let offset_in_cluster = self.offset_in_cluster;
-
-        let dir_entry_offset = self.fs.cluster_offset(current_cluster)? + offset_in_cluster as u64;
+    async fn next(&mut self) -> Result<Option<DirEntryState>, FsError<S::Error>> {
+        let dir_entry_offset =
+            self.fs.cluster_offset(self.current_cluster)? + self.offset_in_cluster as u64;
 
         self.fs
             .storage
@@ -502,8 +497,7 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
         self.fs.storage.read_exact(&mut data).await?;
 
         let state = match data[0] {
-            0x00 => DirEntryState::Last,
-            0xE5 => DirEntryState::Deleted,
+            0x00 | 0xE5 => DirEntryState::Unused((self.current_cluster, self.offset_in_cluster)),
             _ => DirEntryState::Present(DirEntry {
                 name: ShortFileName {
                     raw: data[0..11].try_into().unwrap(),
@@ -516,20 +510,18 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
         };
 
         // if not the last entry, we advance
-        if !matches!(state, DirEntryState::Last) {
-            self.offset_in_cluster += DIR_ENTRY_SIZE;
+        self.offset_in_cluster += DIR_ENTRY_SIZE;
 
-            if self.offset_in_cluster >= self.fs.cluster_size {
-                if let Some(next_cluster) = self.fs.lookup_next_cluster(current_cluster).await? {
-                    self.current_cluster = next_cluster;
-                    self.offset_in_cluster = 0;
-                } else {
-                    return Err(FsError::InvalidFormat);
-                }
+        if self.offset_in_cluster >= self.fs.cluster_size {
+            if let Some(next_cluster) = self.fs.lookup_next_cluster(self.current_cluster).await? {
+                self.current_cluster = next_cluster;
+                self.offset_in_cluster = 0;
+            } else {
+                return Ok(None);
             }
         }
 
-        Ok((state, current_cluster, offset_in_cluster))
+        Ok(Some(state))
     }
 }
 
