@@ -56,11 +56,16 @@ impl<T: Read + Write + Seek> ReadWriteSeek for T {}
 
 pub struct FileSystem<S: ReadWriteSeek> {
     storage: S,
-    boot_sector: BootSector,
-    fat: FileAllocationTable,
-    first_cluster_offset: u64,
     cluster_size: u32,
-    total_clusters: u32,
+
+    root_dir_cluster: u32,
+
+    fat_offset: u64,
+    fat_entries: u32,
+    fat_copies: u8,
+    fat_stride: u64,
+
+    first_data_cluster_offset: u64,
 }
 
 impl<S: ReadWriteSeek> FileSystem<S> {
@@ -95,7 +100,6 @@ impl<S: ReadWriteSeek> FileSystem<S> {
                 sectors_per_cluster: data[13],
                 reserved_sectors: u16::from_le_bytes([data[14], data[15]]),
                 number_of_fats: data[16],
-                total_sectors: u32::from_le_bytes([data[32], data[33], data[34], data[35]]),
                 sectors_per_fat: u32::from_le_bytes([data[36], data[37], data[38], data[39]]),
                 root_directory_cluster: u32::from_le_bytes([
                     data[44], data[45], data[46], data[47],
@@ -117,36 +121,40 @@ impl<S: ReadWriteSeek> FileSystem<S> {
             .await?;
         storage.write_all(&[0xFF; 8]).await?;
 
-        let fat = FileAllocationTable {
-            offset: partition_offset + boot_sector.reserved_sectors as u64 * SECTOR_SIZE as u64,
-            entries_count: boot_sector.sectors_per_fat * (boot_sector.bytes_per_sector as u32 / 4),
-            copies: boot_sector.number_of_fats,
-        };
-
         let cluster_size = boot_sector.sectors_per_cluster as u32 * SECTOR_SIZE;
-        let first_cluster_offset = fat.offset
+
+        let fat_offset =
+            partition_offset + boot_sector.reserved_sectors as u64 * SECTOR_SIZE as u64;
+        let fat_entries = boot_sector.sectors_per_fat * (boot_sector.bytes_per_sector as u32 / 4);
+        let fat_copies = boot_sector.number_of_fats;
+        let fat_stride = boot_sector.sectors_per_fat as u64 * SECTOR_SIZE as u64;
+
+        let first_data_cluster_offset = fat_offset
             + boot_sector.number_of_fats as u64
                 * boot_sector.sectors_per_fat as u64
                 * SECTOR_SIZE as u64;
 
-        let total_clusters = (boot_sector.total_sectors
-            - boot_sector.reserved_sectors as u32
-            - fat.copies as u32 * boot_sector.sectors_per_fat)
-            / boot_sector.sectors_per_cluster as u32;
+        if boot_sector.root_directory_cluster < 2
+            || boot_sector.root_directory_cluster >= fat_entries
+        {
+            return Err(FsError::InvalidFormat);
+        }
 
         Ok(Self {
             storage,
-            boot_sector,
-            fat,
             cluster_size,
-            first_cluster_offset,
-            total_clusters,
+            root_dir_cluster: boot_sector.root_directory_cluster,
+            fat_offset,
+            fat_entries,
+            fat_copies,
+            fat_stride,
+            first_data_cluster_offset,
         })
     }
 
     pub fn root_dir(&self) -> DirHandle {
         DirHandle {
-            start_cluster: self.boot_sector.root_directory_cluster,
+            start_cluster: self.root_dir_cluster,
         }
     }
 
@@ -169,9 +177,9 @@ impl<S: ReadWriteSeek> FileSystem<S> {
     pub async fn create_file(
         &mut self,
         dir: &DirHandle,
-        name: &ShortFileName,
+        name: ShortFileName,
     ) -> Result<DirEntry, FsError<S::Error>> {
-        if self.file_exists(dir, name).await? {
+        if self.file_exists(dir, &name).await? {
             return Err(FsError::FileAlreadyExists);
         }
 
@@ -183,7 +191,7 @@ impl<S: ReadWriteSeek> FileSystem<S> {
                 DirEntryState::Present(_) => (),
                 DirEntryState::Unused(location) => {
                     unused_entry_location = Some(location);
-                },
+                }
             }
         }
 
@@ -195,10 +203,11 @@ impl<S: ReadWriteSeek> FileSystem<S> {
             self.zero_cluster(next_cluster).await?;
             (next_cluster, 0)
         };
-        let dir_entry_offset = self.cluster_offset(cluster)? + offset as u64;
+        let dir_entry_offset = self.cluster_offset(cluster) + offset as u64;
 
         let dir_entry = DirEntry {
-            name: name.clone(),
+            offset: dir_entry_offset,
+            name: name,
             attr: DirEntryAttr::ARCHIVE,
             file_size: 0,
             start_cluster: 0,
@@ -251,24 +260,27 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         })
     }
 
-    fn cluster_offset(&self, cluster: u32) -> Result<u64, FsError<S::Error>> {
-        if cluster < 2 || cluster >= self.total_clusters + 2 {
-            return Err(FsError::InvalidFormat);
-        }
-        Ok(self.first_cluster_offset + (cluster as u64 - 2) * self.cluster_size as u64)
+    fn cluster_offset(&self, cluster: u32) -> u64 {
+        self.first_data_cluster_offset + (cluster as u64 - 2) * self.cluster_size as u64
     }
 
     async fn lookup_next_cluster(
         &mut self,
         cluster: u32,
     ) -> Result<Option<u32>, FsError<S::Error>> {
-        let fat_entry_offset = self.fat.offset + cluster as u64 * 4;
+        let fat_entry_offset = self.fat_offset + cluster as u64 * 4;
         self.storage.seek(SeekFrom::Start(fat_entry_offset)).await?;
         let mut buf = [0u8; 4];
         self.storage.read_exact(&mut buf).await?;
         let fat_entry = FatEntry::new(u32::from_le_bytes(buf));
         match fat_entry {
-            FatEntry::Next(next_cluster) => Ok(Some(next_cluster)),
+            FatEntry::Next(next_cluster) => {
+                if next_cluster >= 2 && cluster < self.fat_entries {
+                    Ok(Some(next_cluster))
+                } else {
+                    Err(FsError::InvalidFormat)
+                }
+            }
             _ => Ok(None),
         }
     }
@@ -280,10 +292,10 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         let mut free_cluster = None;
 
         self.storage
-            .seek(SeekFrom::Start(self.fat.offset + 2 * 4))
+            .seek(SeekFrom::Start(self.fat_offset + 2 * 4))
             .await?; // skip first two entries (reserved)
 
-        for cluster in 2..self.fat.entries_count {
+        for cluster in 2..self.fat_entries {
             let mut buf = [0u8; 4];
             self.storage.read_exact(&mut buf).await?;
 
@@ -295,9 +307,8 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         }
 
         if let Some(next_cluster) = free_cluster {
-            for fat_id in 0..self.fat.copies {
-                let offset = self.fat.offset
-                    + fat_id as u64 * self.boot_sector.sectors_per_fat as u64 * SECTOR_SIZE as u64;
+            for fat_id in 0..self.fat_copies {
+                let offset = self.fat_offset + fat_id as u64 * self.fat_stride;
                 self.storage
                     .seek(SeekFrom::Start(offset + 4 * next_cluster as u64))
                     .await?;
@@ -319,7 +330,7 @@ impl<S: ReadWriteSeek> FileSystem<S> {
     }
 
     async fn zero_cluster(&mut self, cluster: u32) -> Result<(), FsError<S::Error>> {
-        let mut offset = self.cluster_offset(cluster)?;
+        let mut offset = self.cluster_offset(cluster);
         let end_offset = offset + self.cluster_size as u64;
 
         // NOTE: assumes self.cluster_size % buf.len() == 0, which is true if the format is ok
@@ -341,9 +352,10 @@ pub struct DirHandle {
     start_cluster: u32,
 }
 
-// TODO: store global offset
 #[derive(Clone, Debug)]
 pub struct DirEntry {
+    offset: u64,
+
     name: ShortFileName,
     attr: DirEntryAttr,
     file_size: u32,
@@ -486,7 +498,7 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
 
     async fn next(&mut self) -> Result<Option<DirEntryState>, FsError<S::Error>> {
         let dir_entry_offset =
-            self.fs.cluster_offset(self.current_cluster)? + self.offset_in_cluster as u64;
+            self.fs.cluster_offset(self.current_cluster) + self.offset_in_cluster as u64;
 
         self.fs
             .storage
@@ -498,15 +510,22 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
 
         let state = match data[0] {
             0x00 | 0xE5 => DirEntryState::Unused((self.current_cluster, self.offset_in_cluster)),
-            _ => DirEntryState::Present(DirEntry {
-                name: ShortFileName {
-                    raw: data[0..11].try_into().unwrap(),
-                },
-                attr: DirEntryAttr::from_bits_truncate(data[11]),
-                file_size: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
-                start_cluster: ((u16::from_le_bytes([data[20], data[21]]) as u32) << 16)
-                    | u16::from_le_bytes([data[26], data[27]]) as u32,
-            }),
+            _ => {
+                let start_cluster = ((u16::from_le_bytes([data[20], data[21]]) as u32) << 16)
+                    | u16::from_le_bytes([data[26], data[27]]) as u32;
+                if start_cluster < 2 || start_cluster >= self.fs.fat_entries {
+                    return Err(FsError::InvalidFormat);
+                }
+                DirEntryState::Present(DirEntry {
+                    offset: dir_entry_offset,
+                    name: ShortFileName {
+                        raw: data[0..11].try_into().unwrap(),
+                    },
+                    attr: DirEntryAttr::from_bits_truncate(data[11]),
+                    file_size: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
+                    start_cluster,
+                })
+            }
         };
 
         // if not the last entry, we advance
@@ -562,7 +581,7 @@ impl<'a, S: ReadWriteSeek> Read for FileReader<'a, S> {
             let chunk = (read_amount - read_until_now).min(available_in_cluster as usize);
 
             let offset =
-                self.fs.cluster_offset(self.current_cluster)? + self.offset_in_cluster as u64;
+                self.fs.cluster_offset(self.current_cluster) + self.offset_in_cluster as u64;
             self.fs.storage.seek(SeekFrom::Start(offset)).await?;
             self.fs
                 .storage
@@ -590,16 +609,9 @@ struct BootSector {
     sectors_per_cluster: u8,
     reserved_sectors: u16,
     number_of_fats: u8,
-    total_sectors: u32,
     sectors_per_fat: u32,
     root_directory_cluster: u32,
     fs_info_sector: u16,
-}
-
-struct FileAllocationTable {
-    offset: u64,
-    entries_count: u32,
-    copies: u8,
 }
 
 enum FatEntry {
