@@ -17,7 +17,6 @@ pub enum FsError<E> {
     FileAlreadyExists,
     FileDoesNotExist,
     OutOfSpace,
-    FileAlreadyContainsData,
 }
 impl<E: Error> From<E> for FsError<E> {
     fn from(e: E) -> Self {
@@ -42,7 +41,6 @@ impl<E: Error> Display for FsError<E> {
             FsError::FileAlreadyExists => write!(f, "File already exists"),
             FsError::FileDoesNotExist => write!(f, "File does not exist"),
             FsError::OutOfSpace => write!(f, "Out of space"),
-            FsError::FileAlreadyContainsData => write!(f, "File already contains data"),
         }
     }
 }
@@ -179,51 +177,6 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         Ok(found)
     }
 
-    pub async fn create_file(
-        &mut self,
-        dir: &DirHandle,
-        name: ShortFileName,
-    ) -> Result<DirEntry, FsError<S::Error>> {
-        if self.file_exists(dir, &name).await? {
-            return Err(FsError::FileAlreadyExists);
-        }
-
-        let mut unused_entry_location = None;
-
-        let mut it = DirEntryIterInternal::new(self, dir);
-        while let Some(state) = it.next().await? {
-            match state {
-                DirEntryState::Present(_) => (),
-                DirEntryState::Unused(location) => {
-                    unused_entry_location = Some(location);
-                    break;
-                }
-            }
-        }
-
-        let (cluster, offset) = if let Some(location) = unused_entry_location {
-            location
-        } else {
-            let last_cluster = it.current_cluster;
-            let next_cluster = self.alloc_chained_cluster(last_cluster).await?;
-            self.zero_cluster(next_cluster).await?;
-            (next_cluster, 0)
-        };
-        let dir_entry_offset = self.cluster_offset(cluster) + offset as u64;
-
-        let dir_entry = DirEntry {
-            offset: dir_entry_offset,
-            name,
-            attr: DirEntryAttr::ARCHIVE,
-            file_size: 0,
-            start_cluster: None,
-        };
-        self.update_dir_entry(&dir_entry).await?;
-        self.storage.flush().await?;
-
-        Ok(dir_entry)
-    }
-
     pub async fn open_file(
         &mut self,
         dir: &DirHandle,
@@ -255,7 +208,7 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         let mut dir_entry = if let Ok(dir_entry) = self.open_file(&root_dir, &name).await {
             dir_entry
         } else {
-            self.create_file(&root_dir, name).await?
+            self.create_alloc_entry(&root_dir, name).await?
         };
 
         // TODO: verification
@@ -346,12 +299,8 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         })
     }
 
-    pub fn file_writer<'a>(
-        &'a mut self,
-        dir_entry: &'a mut DirEntry,
-        alloc_file: &'a mut AllocFile,
-    ) -> Result<FileWriter<'a, S>, FsError<S::Error>> {
-        FileWriter::new(self, dir_entry, alloc_file)
+    pub fn file_writer(self, alloc_file: AllocFile) -> FileWriter<S> {
+        FileWriter::new(self, alloc_file)
     }
 
     fn cluster_offset(&self, cluster: u32) -> u64 {
@@ -463,6 +412,50 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         }
         self.storage.flush().await?;
         Ok(())
+    }
+
+    async fn create_alloc_entry(
+        &mut self,
+        dir: &DirHandle,
+        name: ShortFileName,
+    ) -> Result<DirEntry, FsError<S::Error>> {
+        if self.file_exists(dir, &name).await? {
+            return Err(FsError::FileAlreadyExists);
+        }
+
+        let mut unused_entry_location = None;
+
+        let mut it = DirEntryIterInternal::new(self, dir);
+        while let Some(state) = it.next().await? {
+            match state {
+                DirEntryState::Present(_) => (),
+                DirEntryState::Unused(location) => {
+                    unused_entry_location = Some(location);
+                    break;
+                }
+            }
+        }
+
+        let (cluster, offset) = if let Some(location) = unused_entry_location {
+            location
+        } else {
+            let last_cluster = it.current_cluster;
+            let next_cluster = self.alloc_chained_cluster(last_cluster).await?;
+            self.zero_cluster(next_cluster).await?;
+            (next_cluster, 0)
+        };
+        let dir_entry_offset = self.cluster_offset(cluster) + offset as u64;
+
+        let dir_entry = DirEntry {
+            offset: dir_entry_offset,
+            name,
+            attr: DirEntryAttr::ARCHIVE,
+            file_size: 0,
+            start_cluster: None,
+        };
+        self.update_dir_entry(&dir_entry).await?;
+
+        Ok(dir_entry)
     }
 }
 
@@ -719,62 +712,66 @@ impl<'a, S: ReadWriteSeek> Read for FileReader<'a, S> {
     }
 }
 
-pub struct FileWriter<'a, S: ReadWriteSeek> {
-    fs: &'a mut FileSystem<S>,
-    dir_entry: &'a mut DirEntry,
-    alloc_file: &'a mut AllocFile,
+pub struct FileWriter<S: ReadWriteSeek> {
+    fs: FileSystem<S>,
+    alloc_file: AllocFile,
     current_cluster: Option<u32>,
     offset_in_cluster: u32,
+    file_size: u32,
 }
 
-impl<'a, S: ReadWriteSeek> FileWriter<'a, S> {
-    pub(crate) fn new(
-        fs: &'a mut FileSystem<S>,
-        dir_entry: &'a mut DirEntry,
-        alloc_file: &'a mut AllocFile,
-    ) -> Result<Self, FsError<S::Error>> {
-        if dir_entry.is_directory() {
-            return Err(FsError::EntryIsDirectory);
-        }
-        if dir_entry.start_cluster.is_some() {
-            return Err(FsError::FileAlreadyContainsData);
-        }
-
-        Ok(Self {
+impl<S: ReadWriteSeek> FileWriter<S> {
+    pub(crate) fn new(fs: FileSystem<S>, alloc_file: AllocFile) -> Self {
+        Self {
             fs,
-            dir_entry,
             alloc_file,
             current_cluster: None,
             offset_in_cluster: 0,
-        })
+            file_size: 0,
+        }
     }
 
-    pub async fn close(self) -> Result<(), FsError<S::Error>> {
+    pub async fn save(
+        &mut self,
+        dir: &DirHandle,
+        name: ShortFileName,
+    ) -> Result<DirEntry, FsError<S::Error>> {
+        let mut dir_entry = self.fs.create_alloc_entry(dir, name).await?;
+        dir_entry.start_cluster = self.alloc_file.dir_entry.start_cluster;
+        dir_entry.file_size = self.file_size;
+        self.fs.update_dir_entry(&dir_entry).await?;
+
         if let Some(current_cluster) = self.current_cluster {
-            self.fs.update_dir_entry(self.dir_entry).await?;
+            self.fs
+                .update_fat_entry(current_cluster, FatEntry::EndOfChain)
+                .await?;
+
             if self.alloc_file.dir_entry.file_size == 0 {
                 self.alloc_file.dir_entry.start_cluster = None;
             } else {
                 self.alloc_file.dir_entry.start_cluster = Some(current_cluster + 1);
             }
             self.fs.update_dir_entry(&self.alloc_file.dir_entry).await?;
-
-            self.fs
-                .update_fat_entry(current_cluster, FatEntry::EndOfChain)
-                .await?;
-
-            self.fs.storage.flush().await?;
         }
 
-        Ok(())
+        self.fs.storage.flush().await?;
+
+        self.file_size = 0;
+        self.current_cluster = None;
+
+        Ok(dir_entry)
+    }
+
+    pub fn into_parts(self) -> (FileSystem<S>, AllocFile) {
+        (self.fs, self.alloc_file)
     }
 }
 
-impl<'a, S: ReadWriteSeek> ErrorType for FileWriter<'a, S> {
+impl<S: ReadWriteSeek> ErrorType for FileWriter<S> {
     type Error = FsError<S::Error>;
 }
 
-impl<'a, S: ReadWriteSeek> Write for FileWriter<'a, S> {
+impl<S: ReadWriteSeek> Write for FileWriter<S> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, FsError<S::Error>> {
         const MAX_FILE_SIZE: u32 = u32::MAX;
 
@@ -782,7 +779,7 @@ impl<'a, S: ReadWriteSeek> Write for FileWriter<'a, S> {
             return Ok(0);
         }
 
-        if self.dir_entry.file_size == MAX_FILE_SIZE {
+        if self.file_size == MAX_FILE_SIZE {
             return Err(FsError::OutOfSpace);
         }
 
@@ -812,14 +809,11 @@ impl<'a, S: ReadWriteSeek> Write for FileWriter<'a, S> {
                 .start_cluster
                 .ok_or(FsError::InvalidFormat)?;
             self.current_cluster = Some(start_cluster);
-            self.dir_entry.start_cluster = Some(start_cluster);
             self.offset_in_cluster = 0;
             start_cluster
         };
 
-        let max_write_count = buf
-            .len()
-            .min((MAX_FILE_SIZE - self.dir_entry.file_size) as usize);
+        let max_write_count = buf.len().min((MAX_FILE_SIZE - self.file_size) as usize);
         let remaining_in_cluster = self.fs.cluster_size - self.offset_in_cluster;
         let write_count = max_write_count.min(remaining_in_cluster as usize);
 
@@ -828,7 +822,7 @@ impl<'a, S: ReadWriteSeek> Write for FileWriter<'a, S> {
         self.fs.storage.write_all(&buf[..write_count]).await?;
 
         self.offset_in_cluster += write_count as u32;
-        self.dir_entry.file_size += write_count as u32;
+        self.file_size += write_count as u32;
 
         Ok(write_count)
     }
