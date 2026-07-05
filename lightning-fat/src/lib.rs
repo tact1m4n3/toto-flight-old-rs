@@ -1,9 +1,12 @@
+#![no_std]
+
 use core::fmt::Display;
+use core::ops::RangeInclusive;
 
 use embedded_io_async::{Error, ErrorType, Read, ReadExactError, Seek, SeekFrom, Write};
 
-pub const SECTOR_SIZE: u32 = 512;
-pub const DIR_ENTRY_SIZE: u32 = 32;
+const SECTOR_SIZE: u32 = 512;
+const DIR_ENTRY_SIZE: u32 = 32;
 
 #[derive(Debug)]
 pub enum FsError<E> {
@@ -14,6 +17,7 @@ pub enum FsError<E> {
     FileAlreadyExists,
     FileDoesNotExist,
     OutOfSpace,
+    FileAlreadyContainsData,
 }
 impl<E: Error> From<E> for FsError<E> {
     fn from(e: E) -> Self {
@@ -38,6 +42,7 @@ impl<E: Error> Display for FsError<E> {
             FsError::FileAlreadyExists => write!(f, "File already exists"),
             FsError::FileDoesNotExist => write!(f, "File does not exist"),
             FsError::OutOfSpace => write!(f, "Out of space"),
+            FsError::FileAlreadyContainsData => write!(f, "File already contains data"),
         }
     }
 }
@@ -125,7 +130,7 @@ impl<S: ReadWriteSeek> FileSystem<S> {
 
         let fat_offset =
             partition_offset + boot_sector.reserved_sectors as u64 * SECTOR_SIZE as u64;
-        let fat_entries = boot_sector.sectors_per_fat * (boot_sector.bytes_per_sector as u32 / 4);
+        let fat_entries = boot_sector.sectors_per_fat * (SECTOR_SIZE / 4);
         let fat_copies = boot_sector.number_of_fats;
         let fat_stride = boot_sector.sectors_per_fat as u64 * SECTOR_SIZE as u64;
 
@@ -191,6 +196,7 @@ impl<S: ReadWriteSeek> FileSystem<S> {
                 DirEntryState::Present(_) => (),
                 DirEntryState::Unused(location) => {
                     unused_entry_location = Some(location);
+                    break;
                 }
             }
         }
@@ -207,19 +213,12 @@ impl<S: ReadWriteSeek> FileSystem<S> {
 
         let dir_entry = DirEntry {
             offset: dir_entry_offset,
-            name: name,
+            name,
             attr: DirEntryAttr::ARCHIVE,
             file_size: 0,
-            start_cluster: 0,
+            start_cluster: None,
         };
-
-        let mut data = [0u8; DIR_ENTRY_SIZE as usize];
-        data[0..11].copy_from_slice(&dir_entry.name.raw);
-        data[11] = dir_entry.attr.bits();
-        // the rest of the fields are zero on creation
-
-        self.storage.seek(SeekFrom::Start(dir_entry_offset)).await?;
-        self.storage.write_all(&data).await?;
+        self.update_dir_entry(&dir_entry).await?;
         self.storage.flush().await?;
 
         Ok(dir_entry)
@@ -245,6 +244,93 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         }
     }
 
+    pub async fn get_or_create_cluster_allocator_file(
+        &mut self,
+        free_clusters: u32,
+        file_size: RangeInclusive<u32>,
+    ) -> Result<AllocFile, FsError<S::Error>> {
+        let root_dir = self.root_dir();
+        let name = ShortFileName::new(b"FREE").unwrap();
+
+        let mut dir_entry = if let Ok(dir_entry) = self.open_file(&root_dir, &name).await {
+            dir_entry
+        } else {
+            self.create_file(&root_dir, name).await?
+        };
+
+        // TODO: verification
+
+        // if the file is already at max size we don't need to allocate more clusters
+        if dir_entry.file_size >= *file_size.end() {
+            return Ok(AllocFile { dir_entry });
+        }
+
+        let end_cluster = if let Some(start_cluster) = dir_entry.start_cluster {
+            self.search_end_of_chain_cluster(start_cluster).await?
+        } else {
+            let mut maybe_start_cluster = None;
+            let mut remaining_skip = free_clusters;
+            let mut contiguous_size = 0;
+
+            for current_cluster in 2..self.fat_entries {
+                if matches!(
+                    self.lookup_fat_entry(current_cluster).await?,
+                    FatEntry::Free
+                ) {
+                    if remaining_skip == 0 {
+                        if contiguous_size == 0 {
+                            maybe_start_cluster = Some(current_cluster);
+                        }
+                        contiguous_size += self.cluster_size;
+                        if contiguous_size >= *file_size.start() {
+                            break;
+                        }
+                    } else {
+                        remaining_skip -= 1;
+                    }
+                } else {
+                    contiguous_size = 0;
+                    maybe_start_cluster = None;
+                }
+            }
+
+            let start_cluster = maybe_start_cluster.ok_or(FsError::OutOfSpace)?;
+            dir_entry.start_cluster = Some(start_cluster);
+            dir_entry.file_size = self.cluster_size;
+            self.update_fat_entry(start_cluster, FatEntry::EndOfChain)
+                .await?;
+            start_cluster
+        };
+
+        let mut prev_cluster = end_cluster;
+        for current_cluster in end_cluster + 1..self.fat_entries {
+            if let Some(new_size) = dir_entry.file_size.checked_add(self.cluster_size)
+                && new_size <= *file_size.end()
+            {
+                dir_entry.file_size = new_size;
+            } else {
+                break;
+            }
+            if !matches!(
+                self.lookup_fat_entry(current_cluster).await?,
+                FatEntry::Free
+            ) {
+                break;
+            }
+
+            self.update_fat_entry(prev_cluster, FatEntry::Next(current_cluster))
+                .await?;
+            self.update_fat_entry(current_cluster, FatEntry::EndOfChain)
+                .await?;
+            prev_cluster = current_cluster;
+        }
+
+        self.update_dir_entry(&dir_entry).await?;
+        self.storage.flush().await?;
+
+        Ok(AllocFile { dir_entry })
+    }
+
     pub fn file_reader<'a>(
         &'a mut self,
         entry: &DirEntry,
@@ -260,68 +346,101 @@ impl<S: ReadWriteSeek> FileSystem<S> {
         })
     }
 
+    pub fn file_writer<'a>(
+        &'a mut self,
+        dir_entry: &'a mut DirEntry,
+        alloc_file: &'a mut AllocFile,
+    ) -> Result<FileWriter<'a, S>, FsError<S::Error>> {
+        FileWriter::new(self, dir_entry, alloc_file)
+    }
+
     fn cluster_offset(&self, cluster: u32) -> u64 {
         self.first_data_cluster_offset + (cluster as u64 - 2) * self.cluster_size as u64
     }
 
-    async fn lookup_next_cluster(
-        &mut self,
-        cluster: u32,
-    ) -> Result<Option<u32>, FsError<S::Error>> {
+    async fn lookup_fat_entry(&mut self, cluster: u32) -> Result<FatEntry, FsError<S::Error>> {
         let fat_entry_offset = self.fat_offset + cluster as u64 * 4;
         self.storage.seek(SeekFrom::Start(fat_entry_offset)).await?;
         let mut buf = [0u8; 4];
         self.storage.read_exact(&mut buf).await?;
         let fat_entry = FatEntry::new(u32::from_le_bytes(buf));
-        match fat_entry {
-            FatEntry::Next(next_cluster) => {
-                if next_cluster >= 2 && cluster < self.fat_entries {
-                    Ok(Some(next_cluster))
-                } else {
-                    Err(FsError::InvalidFormat)
+        // validate entry
+        if let FatEntry::Next(next_cluster) = fat_entry
+            && (next_cluster < 2 || next_cluster >= self.fat_entries)
+        {
+            return Err(FsError::InvalidFormat);
+        }
+        Ok(fat_entry)
+    }
+
+    async fn update_fat_entry(
+        &mut self,
+        cluster: u32,
+        entry: FatEntry,
+    ) -> Result<(), FsError<S::Error>> {
+        for fat_id in 0..self.fat_copies {
+            let offset = self.fat_offset + fat_id as u64 * self.fat_stride;
+            self.storage
+                .seek(SeekFrom::Start(offset + cluster as u64 * 4))
+                .await?;
+            self.storage.write_all(&entry.raw().to_le_bytes()).await?;
+        }
+        Ok(())
+    }
+
+    async fn search_end_of_chain_cluster(
+        &mut self,
+        start_cluster: u32,
+    ) -> Result<u32, FsError<S::Error>> {
+        let mut current_cluster = start_cluster;
+        loop {
+            match self.lookup_fat_entry(current_cluster).await? {
+                FatEntry::Next(next_cluster) => {
+                    current_cluster = next_cluster;
+                }
+                FatEntry::EndOfChain => {
+                    return Ok(current_cluster);
+                }
+                _ => {
+                    return Err(FsError::InvalidFormat);
                 }
             }
-            _ => Ok(None),
         }
+    }
+
+    async fn update_dir_entry(&mut self, entry: &DirEntry) -> Result<(), FsError<S::Error>> {
+        let mut data = [0u8; DIR_ENTRY_SIZE as usize];
+        data[0..11].copy_from_slice(&entry.name.raw);
+        data[11] = entry.attr.bits();
+        if let Some(start_cluster) = entry.start_cluster {
+            data[20..22].copy_from_slice(&((start_cluster >> 16) as u16).to_le_bytes());
+            data[26..28].copy_from_slice(&(start_cluster as u16).to_le_bytes());
+        }
+        data[28..32].copy_from_slice(&entry.file_size.to_le_bytes());
+
+        self.storage.seek(SeekFrom::Start(entry.offset)).await?;
+        self.storage.write_all(&data).await?;
+
+        Ok(())
     }
 
     async fn alloc_chained_cluster(&mut self, prev_cluster: u32) -> Result<u32, FsError<S::Error>> {
         // TODO: use FS INFO Nxt_Free to not search from the beginning
-        // TODO: prev cluster not checked for being greater than two
 
         let mut free_cluster = None;
 
-        self.storage
-            .seek(SeekFrom::Start(self.fat_offset + 2 * 4))
-            .await?; // skip first two entries (reserved)
-
         for cluster in 2..self.fat_entries {
-            let mut buf = [0u8; 4];
-            self.storage.read_exact(&mut buf).await?;
-
-            let entry = FatEntry::new(u32::from_le_bytes(buf));
-            if let FatEntry::Free = entry {
+            if self.lookup_fat_entry(cluster).await? == FatEntry::Free {
                 free_cluster = Some(cluster);
                 break;
             }
         }
 
         if let Some(next_cluster) = free_cluster {
-            for fat_id in 0..self.fat_copies {
-                let offset = self.fat_offset + fat_id as u64 * self.fat_stride;
-                self.storage
-                    .seek(SeekFrom::Start(offset + 4 * next_cluster as u64))
-                    .await?;
-                self.storage
-                    .write_all(&FatEntry::EndOfChain.raw().to_le_bytes())
-                    .await?;
-                self.storage
-                    .seek(SeekFrom::Start(offset + 4 * prev_cluster as u64))
-                    .await?;
-                self.storage
-                    .write_all(&FatEntry::Next(next_cluster).raw().to_le_bytes())
-                    .await?;
-            }
+            self.update_fat_entry(next_cluster, FatEntry::EndOfChain)
+                .await?;
+            self.update_fat_entry(prev_cluster, FatEntry::Next(next_cluster))
+                .await?;
             self.storage.flush().await?;
             Ok(next_cluster)
         } else {
@@ -353,13 +472,24 @@ pub struct DirHandle {
 }
 
 #[derive(Clone, Debug)]
+pub struct AllocFile {
+    dir_entry: DirEntry,
+}
+
+impl AllocFile {
+    pub fn dir_entry(&self) -> &DirEntry {
+        &self.dir_entry
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct DirEntry {
     offset: u64,
 
     name: ShortFileName,
     attr: DirEntryAttr,
     file_size: u32,
-    start_cluster: u32,
+    start_cluster: Option<u32>,
 }
 
 impl DirEntry {
@@ -497,6 +627,17 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
     }
 
     async fn next(&mut self) -> Result<Option<DirEntryState>, FsError<S::Error>> {
+        if self.offset_in_cluster >= self.fs.cluster_size {
+            if let FatEntry::Next(next_cluster) =
+                self.fs.lookup_fat_entry(self.current_cluster).await?
+            {
+                self.current_cluster = next_cluster;
+                self.offset_in_cluster = 0;
+            } else {
+                return Ok(None);
+            }
+        }
+
         let dir_entry_offset =
             self.fs.cluster_offset(self.current_cluster) + self.offset_in_cluster as u64;
 
@@ -513,9 +654,6 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
             _ => {
                 let start_cluster = ((u16::from_le_bytes([data[20], data[21]]) as u32) << 16)
                     | u16::from_le_bytes([data[26], data[27]]) as u32;
-                if start_cluster < 2 || start_cluster >= self.fs.fat_entries {
-                    return Err(FsError::InvalidFormat);
-                }
                 DirEntryState::Present(DirEntry {
                     offset: dir_entry_offset,
                     name: ShortFileName {
@@ -523,22 +661,18 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
                     },
                     attr: DirEntryAttr::from_bits_truncate(data[11]),
                     file_size: u32::from_le_bytes([data[28], data[29], data[30], data[31]]),
-                    start_cluster,
+                    start_cluster: if start_cluster != 0
+                        && (start_cluster >= 2 && start_cluster <= self.fs.fat_entries)
+                    {
+                        Some(start_cluster)
+                    } else {
+                        None
+                    },
                 })
             }
         };
 
-        // if not the last entry, we advance
         self.offset_in_cluster += DIR_ENTRY_SIZE;
-
-        if self.offset_in_cluster >= self.fs.cluster_size {
-            if let Some(next_cluster) = self.fs.lookup_next_cluster(self.current_cluster).await? {
-                self.current_cluster = next_cluster;
-                self.offset_in_cluster = 0;
-            } else {
-                return Ok(None);
-            }
-        }
 
         Ok(Some(state))
     }
@@ -546,7 +680,7 @@ impl<'a, S: ReadWriteSeek> DirEntryIterInternal<'a, S> {
 
 pub struct FileReader<'a, S: ReadWriteSeek> {
     fs: &'a mut FileSystem<S>,
-    current_cluster: u32,
+    current_cluster: Option<u32>,
     offset_in_cluster: u32,
     bytes_remaining: u32,
 }
@@ -560,40 +694,147 @@ impl<'a, S: ReadWriteSeek> Read for FileReader<'a, S> {
         if self.bytes_remaining == 0 {
             return Ok(0);
         }
+        let Some(current_cluster) = self.current_cluster else {
+            return Ok(0);
+        };
 
-        let read_amount = buf.len().min(self.bytes_remaining as usize);
-        let mut read_until_now = 0;
+        let max_read_count = buf.len().min(self.bytes_remaining as usize);
 
-        while read_until_now < read_amount {
-            if self.offset_in_cluster >= self.fs.cluster_size {
-                match self.fs.lookup_next_cluster(self.current_cluster).await? {
-                    Some(next) => {
-                        self.current_cluster = next;
-                        self.offset_in_cluster = 0;
-                    }
-                    None => {
-                        return Err(FsError::UnexpectedEof);
-                    }
-                }
-            }
+        let available_in_cluster = self.fs.cluster_size - self.offset_in_cluster;
+        let read_count = max_read_count.min(available_in_cluster as usize);
 
-            let available_in_cluster = self.fs.cluster_size - self.offset_in_cluster;
-            let chunk = (read_amount - read_until_now).min(available_in_cluster as usize);
+        let offset = self.fs.cluster_offset(current_cluster) + self.offset_in_cluster as u64;
+        self.fs.storage.seek(SeekFrom::Start(offset)).await?;
+        self.fs.storage.read_exact(&mut buf[..read_count]).await?;
 
-            let offset =
-                self.fs.cluster_offset(self.current_cluster) + self.offset_in_cluster as u64;
-            self.fs.storage.seek(SeekFrom::Start(offset)).await?;
-            self.fs
-                .storage
-                .read_exact(&mut buf[read_until_now..][..chunk])
-                .await?;
+        self.offset_in_cluster += read_count as u32;
+        self.bytes_remaining -= read_count as u32;
 
-            read_until_now += chunk;
-            self.offset_in_cluster += chunk as u32;
-            self.bytes_remaining -= chunk as u32;
+        if self.offset_in_cluster >= self.fs.cluster_size {
+            self.current_cluster = self.fs.lookup_fat_entry(current_cluster).await?.get_next();
+            self.offset_in_cluster = 0;
         }
 
-        Ok(read_until_now)
+        Ok(read_count)
+    }
+}
+
+pub struct FileWriter<'a, S: ReadWriteSeek> {
+    fs: &'a mut FileSystem<S>,
+    dir_entry: &'a mut DirEntry,
+    alloc_file: &'a mut AllocFile,
+    current_cluster: Option<u32>,
+    offset_in_cluster: u32,
+}
+
+impl<'a, S: ReadWriteSeek> FileWriter<'a, S> {
+    pub(crate) fn new(
+        fs: &'a mut FileSystem<S>,
+        dir_entry: &'a mut DirEntry,
+        alloc_file: &'a mut AllocFile,
+    ) -> Result<Self, FsError<S::Error>> {
+        if dir_entry.is_directory() {
+            return Err(FsError::EntryIsDirectory);
+        }
+        if dir_entry.start_cluster.is_some() {
+            return Err(FsError::FileAlreadyContainsData);
+        }
+
+        Ok(Self {
+            fs,
+            dir_entry,
+            alloc_file,
+            current_cluster: None,
+            offset_in_cluster: 0,
+        })
+    }
+
+    pub async fn close(self) -> Result<(), FsError<S::Error>> {
+        if let Some(current_cluster) = self.current_cluster {
+            self.fs.update_dir_entry(self.dir_entry).await?;
+            if self.alloc_file.dir_entry.file_size == 0 {
+                self.alloc_file.dir_entry.start_cluster = None;
+            } else {
+                self.alloc_file.dir_entry.start_cluster = Some(current_cluster + 1);
+            }
+            self.fs.update_dir_entry(&self.alloc_file.dir_entry).await?;
+
+            self.fs
+                .update_fat_entry(current_cluster, FatEntry::EndOfChain)
+                .await?;
+
+            self.fs.storage.flush().await?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a, S: ReadWriteSeek> ErrorType for FileWriter<'a, S> {
+    type Error = FsError<S::Error>;
+}
+
+impl<'a, S: ReadWriteSeek> Write for FileWriter<'a, S> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, FsError<S::Error>> {
+        const MAX_FILE_SIZE: u32 = u32::MAX;
+
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        if self.dir_entry.file_size == MAX_FILE_SIZE {
+            return Err(FsError::OutOfSpace);
+        }
+
+        let current_cluster = if let Some(mut current_cluster) = self.current_cluster {
+            if self.offset_in_cluster >= self.fs.cluster_size {
+                self.alloc_file.dir_entry.file_size = self
+                    .alloc_file
+                    .dir_entry
+                    .file_size
+                    .checked_sub(self.fs.cluster_size)
+                    .ok_or(FsError::OutOfSpace)?;
+                current_cluster += 1;
+                self.current_cluster = Some(current_cluster);
+                self.offset_in_cluster = 0;
+            }
+            current_cluster
+        } else {
+            self.alloc_file.dir_entry.file_size = self
+                .alloc_file
+                .dir_entry
+                .file_size
+                .checked_sub(self.fs.cluster_size)
+                .ok_or(FsError::OutOfSpace)?;
+            let start_cluster = self
+                .alloc_file
+                .dir_entry
+                .start_cluster
+                .ok_or(FsError::InvalidFormat)?;
+            self.current_cluster = Some(start_cluster);
+            self.dir_entry.start_cluster = Some(start_cluster);
+            self.offset_in_cluster = 0;
+            start_cluster
+        };
+
+        let max_write_count = buf
+            .len()
+            .min((MAX_FILE_SIZE - self.dir_entry.file_size) as usize);
+        let remaining_in_cluster = self.fs.cluster_size - self.offset_in_cluster;
+        let write_count = max_write_count.min(remaining_in_cluster as usize);
+
+        let offset = self.fs.cluster_offset(current_cluster) + self.offset_in_cluster as u64;
+        self.fs.storage.seek(SeekFrom::Start(offset)).await?;
+        self.fs.storage.write_all(&buf[..write_count]).await?;
+
+        self.offset_in_cluster += write_count as u32;
+        self.dir_entry.file_size += write_count as u32;
+
+        Ok(write_count)
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -614,6 +855,7 @@ struct BootSector {
     fs_info_sector: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FatEntry {
     Free,
     Next(u32),
@@ -637,6 +879,14 @@ impl FatEntry {
             FatEntry::Next(cluster) => cluster & 0x0FFFFFFF,
             FatEntry::EndOfChain => 0x0FFFFFFF,
             FatEntry::BadCluster => 0x0FFFFFF7,
+        }
+    }
+
+    pub fn get_next(self) -> Option<u32> {
+        if let FatEntry::Next(next_cluster) = self {
+            Some(next_cluster)
+        } else {
+            None
         }
     }
 }
