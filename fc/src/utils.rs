@@ -1,12 +1,16 @@
 use core::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ops::Range,
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
+use embassy_sync::blocking_mutex::{
+    Mutex,
+    raw::{CriticalSectionRawMutex, RawMutex},
+};
 use embassy_time::Duration;
 use embedded_io_async::BufRead;
+use heapless::Deque;
 use uom::si::{f32::Time, time::microsecond};
 
 pub const US_TO_ZERO_ONE: Mapping = Mapping {
@@ -131,55 +135,80 @@ macro_rules! assign_resources {
     }
 }
 
-pub struct SyncWatch<M: RawMutex, T: Copy> {
-    state: Mutex<M, RefCell<T>>,
-    current_version: AtomicU32,
+struct SyncWatchState<T: Copy> {
+    value: Option<T>,
+    current_version: u32,
+    sender: Option<()>,
 }
 
-impl<M: RawMutex, T: Copy> SyncWatch<M, T> {
-    pub const fn new(initial_value: T) -> Self {
+pub(crate) struct SyncWatch<T: Copy> {
+    state: Mutex<CriticalSectionRawMutex, RefCell<SyncWatchState<T>>>,
+}
+
+impl<T: Copy> SyncWatch<T> {
+    pub const fn new() -> Self {
         Self {
-            state: Mutex::new(RefCell::new(initial_value)),
-            current_version: AtomicU32::new(0),
+            state: Mutex::new(RefCell::new(SyncWatchState {
+                value: None,
+                current_version: 0,
+                sender: Some(()),
+            })),
         }
     }
 
-    pub fn watcher<'a>(&'a self) -> SyncWatchReader<'a, M, T> {
-        SyncWatchReader {
+    pub fn sender<'a>(&'a self) -> SyncWatchSender<'a, T> {
+        self.state
+            .lock(|state| state.borrow_mut().sender.take())
+            .unwrap();
+        SyncWatchSender { watch: self }
+    }
+
+    pub fn receiver<'a>(&'a self) -> SyncWatchReceiver<'a, T> {
+        SyncWatchReceiver {
             watch: self,
             last_read_version: None,
         }
     }
+}
 
-    pub fn get(&self) -> T {
-        self.state.lock(|state| *state.borrow())
-    }
+pub struct SyncWatchSender<'a, T: Copy> {
+    watch: &'a SyncWatch<T>,
+}
 
-    pub fn set(&self, new_value: T) {
-        self.state.lock(|state| {
-            *state.borrow_mut() = new_value;
-            self.current_version.fetch_add(1, Ordering::Acquire);
+impl<'a, T: Copy> SyncWatchSender<'a, T> {
+    pub fn send(&self, new_value: T) {
+        self.watch.state.lock(|state| {
+            let mut state = state.borrow_mut();
+            state.value = Some(new_value);
+            state.current_version = state.current_version.wrapping_add(1);
         });
     }
 }
 
-pub struct SyncWatchReader<'a, M: RawMutex, T: Copy> {
-    watch: &'a SyncWatch<M, T>,
+#[derive(Clone)]
+pub struct SyncWatchReceiver<'a, T: Copy> {
+    watch: &'a SyncWatch<T>,
     last_read_version: Option<u32>,
 }
 
-impl<'a, M: RawMutex, T: Copy> SyncWatchReader<'a, M, T> {
-    pub fn get_if_changed(&mut self) -> Option<T> {
-        let current_version = self.watch.current_version.load(Ordering::Acquire);
-        if let Some(last_read_version) = self.last_read_version
-            && current_version == last_read_version
-        {
-            return None;
-        }
+impl<'a, T: Copy> SyncWatchReceiver<'a, T> {
+    pub fn get(&self) -> Option<T> {
+        self.watch.state.lock(|state| state.borrow().value)
+    }
 
-        let value = self.watch.get();
-        self.last_read_version = Some(current_version);
-        Some(value)
+    pub fn get_if_changed(&mut self) -> Option<T> {
+        self.watch.state.lock(|state| {
+            let state = state.borrow();
+
+            if let Some(last_read_version) = self.last_read_version
+                && state.current_version == last_read_version
+            {
+                return None;
+            }
+            self.last_read_version = Some(state.current_version);
+
+            state.value
+        })
     }
 }
 

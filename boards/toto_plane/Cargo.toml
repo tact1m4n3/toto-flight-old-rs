@@ -41,7 +41,9 @@ defmt = { version = "1.0.1", optional = true }
 defmt-rtt = { version = "1.1.0", optional = true, features = ["disable-blocking-mode"] }
 panic-probe = { version = "1.0.0" }
 
-embedded-sdmmc = { git = "https://github.com/tact1m4n3/embedded-sdmmc-rs", branch = "max_file_size_error", default-features = false }
+aligned = "0.4.3"
+sdspi = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528" }
+block-device-adapters = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528" }
 
 fixed = "1.30.0"
 static_cell = "2.1.1"

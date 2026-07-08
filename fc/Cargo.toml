@@ -9,7 +9,6 @@ defmt = [
     "dep:defmt",
     "embassy-time/defmt",
     "embassy-time/defmt-timestamp-uptime-ms",
-    "embedded-sdmmc/defmt-log",
     "embassy-rp/defmt"
 ]
 rp = ["dep:embassy-rp", "dep:pio"]
@@ -46,7 +45,7 @@ pio = { version = "0.3.0", optional = true }
 defmt = { version = "1.0.1", optional = true }
 
 static_cell = "2.1.1"
-heapless = { version = "0.9.2", features = ["serde"] }
+heapless = { version = "0.9.3", features = ["serde"] }
 futures = { version = "0.3.32", default-features = false, features = ["async-await"] }
 
 num_enum = { version = "0.7.5", default-features = false }
@@ -58,7 +57,8 @@ uom = { version = "0.38.0", default-features = false, features = ["f32", "f64", 
 
 ahrs = { version = "0.8.0", default-features = false }
 
-embedded-sdmmc = { git = "https://github.com/tact1m4n3/embedded-sdmmc-rs", branch = "max_file_size_error", default-features = false }
+block-device-adapters = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "518528" }
+fast-fat32 = { path = "../libs/fast-fat32" }
 
 # crsf = { version = "3.0.0", features = [], git = "https://github.com/tact1m4n3/crsf-rs" }
 crsf = { path = "../../crsf-rs", features = [] }
@@ -73,6 +73,3 @@ serde = { version = "1.0.228", default-features = false, features = ["derive"] }
 postcard = "1.1.3"
 
 smart-leds = "0.4.0"
-
-[patch.crates-io]
-embedded-sdmmc = { git = "https://github.com/tact1m4n3/embedded-sdmmc-rs", branch = "max_file_size_error" }

@@ -35,6 +35,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aligned"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee4508988c62edf04abd8d92897fca0c2995d907ce1dfeaf369dac3716a40685"
+dependencies = [
+ "as-slice",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -44,19 +53,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrary-int"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993a810118f8f37e9c4411c86f1c4c940a09a7ab34b7bf2d88d06f50c553fab7"
-dependencies = [
- "defmt",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
+
+[[package]]
+name = "as-slice"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "516b6b4f0e40d50dcda9365d53964ec74560ad4284da2e7fc97122cd83174516"
+dependencies = [
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "ascii-canvas"
@@ -113,17 +122,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
-name = "bitbybit"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71d2a3353d70ac1091a33cbf31fc7e77b19091538a7e306e3740712af19807ca"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
 name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -175,6 +173,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "block-device-adapters"
+version = "0.2.0"
+source = "git+https://github.com/MabezDev/embedded-fatfs?rev=518528#518528cc111fcf65c48abbdeb80735a38eada112"
+dependencies = [
+ "aligned",
+ "block-device-driver",
+ "embedded-io-async",
+]
+
+[[package]]
+name = "block-device-driver"
+version = "0.2.0"
+source = "git+https://github.com/MabezDev/embedded-fatfs?rev=518528#518528cc111fcf65c48abbdeb80735a38eada112"
+dependencies = [
+ "aligned",
 ]
 
 [[package]]
@@ -585,22 +601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-sdmmc"
-version = "0.9.0"
-source = "git+https://github.com/tact1m4n3/embedded-sdmmc-rs?branch=max_file_size_error#7449bc2949cc31c45d1692ebae9ba9f02b123837"
-dependencies = [
- "arbitrary-int",
- "bitbybit",
- "bitflags 2.13.0",
- "byteorder",
- "defmt",
- "embedded-hal 1.0.0",
- "embedded-io",
- "heapless 0.9.3",
- "thiserror",
-]
-
-[[package]]
 name = "embedded-storage"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -637,10 +637,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "fast-fat32"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.13.0",
+ "embedded-io-async",
+]
+
+[[package]]
 name = "fc"
 version = "0.1.0"
 dependencies = [
  "ahrs",
+ "block-device-adapters",
  "cortex-m",
  "cortex-m-rt",
  "critical-section",
@@ -658,8 +667,8 @@ dependencies = [
  "embedded-hal-nb",
  "embedded-io",
  "embedded-io-async",
- "embedded-sdmmc",
  "embedded-storage-async",
+ "fast-fat32",
  "fixed",
  "futures",
  "heapless 0.9.3",

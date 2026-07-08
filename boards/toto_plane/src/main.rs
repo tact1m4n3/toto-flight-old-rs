@@ -3,6 +3,7 @@
 
 use core::ops::Range;
 
+use block_device_adapters::BufStream;
 use embassy_embedded_hal::{adapter::BlockingAsync, shared_bus::asynch::i2c::I2cDevice};
 use embassy_executor::{InterruptExecutor, Spawner};
 use embassy_rp::{
@@ -17,7 +18,6 @@ use embassy_rp::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
 use embassy_time::{Delay, Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use embedded_sdmmc::sdcard::spi::AcquireOpts;
 use fixed::FixedU16;
 use static_cell::StaticCell;
 
@@ -108,6 +108,8 @@ assign_resources! {
         mosi_pin: PIN_35,
         miso_pin: PIN_36,
         cs_pin: PIN_39,
+        tx_dma: DMA_CH3,
+        rx_dma: DMA_CH4,
     },
     flash: FlashPeripherals {
         flash: FLASH,
@@ -125,11 +127,9 @@ assign_resources! {
 embassy_rp::bind_interrupts!(pub struct Irqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>,
                  dma::InterruptHandler<DMA_CH1>,
-                 dma::InterruptHandler<DMA_CH2>;
-                 // dma::InterruptHandler<DMA_CH3>,
-                 // dma::InterruptHandler<DMA_CH4>,
-                 // dma::InterruptHandler<DMA_CH5>,
-                 // dma::InterruptHandler<DMA_CH6>;
+                 dma::InterruptHandler<DMA_CH2>,
+                 dma::InterruptHandler<DMA_CH3>,
+                 dma::InterruptHandler<DMA_CH4>;
     I2C0_IRQ => i2c::InterruptHandler<I2C0>;
     UART0_IRQ => uart::BufferedInterruptHandler<UART0>;
     UART1_IRQ => uart::BufferedInterruptHandler<UART1>;
@@ -318,18 +318,38 @@ async fn main(thread_spawner: Spawner) -> ! {
         SharedI2cDevice::new(I2C_BUS.init(AsyncMutex::new(i2c_bus)))
     };
 
-    let sd_card_spi_device = {
+    let sd_card_buf_stream = {
         let mut config = spi::Config::default();
         config.frequency = 100_000;
-        let spi = spi::Spi::new_blocking(
+
+        let mut spi = spi::Spi::new(
             r.sd_card.spi,
             r.sd_card.clk_pin,
             r.sd_card.mosi_pin,
             r.sd_card.miso_pin,
+            r.sd_card.tx_dma,
+            r.sd_card.rx_dma,
+            Irqs,
             config,
         );
-        let spi_cs = gpio::Output::new(r.sd_card.cs_pin, gpio::Level::High);
-        ExclusiveDevice::new_no_delay(spi, spi_cs).unwrap() // NOTE: can't fail
+
+        let mut cs = gpio::Output::new(r.sd_card.cs_pin, gpio::Level::High);
+
+        sdspi::sd_init(&mut spi, &mut cs).await.unwrap();
+
+        let spi_device = ExclusiveDevice::new(spi, cs, embassy_time::Delay).unwrap();
+
+        let mut sd = sdspi::SdSpi::<_, _, aligned::A1>::new(spi_device, embassy_time::Delay);
+
+        sd.init().await.unwrap();
+        let size = sd.size().await.unwrap();
+        info!("sd card size: {}MB", (size / 1024 / 1024) as u64);
+
+        let mut config = spi::Config::default();
+        config.frequency = 12_000_000;
+        sd.spi().bus_mut().set_config(&config);
+
+        BufStream::<_, 512>::new(sd)
     };
 
     let battery_sensor = BatterySensor::new(i2c_device.clone()).await.unwrap();
@@ -377,38 +397,15 @@ async fn main(thread_spawner: Spawner) -> ! {
     low_prio_spawner.spawn(task_vtx_msp_read(vtx_uart_rx).unwrap());
     low_prio_spawner.spawn(task_vtx_msp_write(vtx_uart_tx).unwrap());
 
-    let mut maybe_black_box = {
-        let sd_card = embedded_sdmmc::SdCard::new_with_options(
-            sd_card_spi_device,
-            Delay,
-            AcquireOpts {
-                use_crc: true,
-                acquire_retries: 1,
-            },
-        );
-
-        // this also initializes the sdcard
-        if let Ok(_sd_card_size) = sd_card.num_bytes() {
-            info!("sd card size: {}MB", _sd_card_size / 1024 / 1024);
-
-            // up the frequency after initialization
-            let mut config = spi::Config::default();
-            config.frequency = 12_000_000;
-            sd_card.spi(|dev| dev.bus_mut().set_config(&config));
-
-            Some(sd_card)
-        } else {
-            None
-        }
-    }
-    .and_then(|sd_card| fc::black_box::Storage::new(sd_card).ok());
+    // TODO: Spawn black box task with sd_card_buf_stream once fc::black_box is refactored
+    // to use async fast-fat32. The sd_card_buf_stream must be kept alive in main's scope
+    // until then.
+    let _sd_card_buf_stream = sd_card_buf_stream;
 
     #[cfg(feature = "debug")]
     let mut cpu_usage_tracker = fc::cpu_usage::Tracker::new(&mut _cp);
 
     loop {
-        maybe_black_box.take_if(|black_box| black_box.poll().is_err());
-
         #[cfg(feature = "debug")]
         cpu_usage_tracker.on_idle(&mut _cp);
 
