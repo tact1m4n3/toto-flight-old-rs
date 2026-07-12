@@ -10,15 +10,20 @@ use crate::{
     utils::SyncWatch,
 };
 
+pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new();
+
+#[derive(Clone, Copy)]
+pub struct Data {
+    /// (Should be) Filtered gyro reading, FRD, in the body frame
+    pub gyro: AngularVelocity3D,
+    /// (Should be) Filtered accelerometer reading, FRD, in the body frame
+    pub accel: Acceleration3D,
+}
+
 static TAKE_SAMPLE_SIGNAL: Signal<RawMutex, ()> = Signal::new();
 
 static CALIBRATE: Signal<RawMutex, ()> = Signal::new();
 static IMU_RAW_SAMPLE: Signal<RawMutex, ImuSample> = Signal::new();
-
-pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
-    gyro: AngularVelocity3D::ZEROS,
-    accel: Acceleration3D::ZEROS,
-});
 
 pub fn start_calibration() {
     CALIBRATE.signal(());
@@ -133,12 +138,4 @@ async fn easy_calibration() {
         .await
         .ok();
     crate::REBOOT.signal(());
-}
-
-#[derive(Clone, Copy)]
-pub struct Data {
-    /// (Should be) Filtered gyro reading, FRD, in the body frame
-    pub gyro: AngularVelocity3D,
-    /// (Should be) Filtered accelerometer reading, FRD, in the body frame
-    pub accel: Acceleration3D,
 }

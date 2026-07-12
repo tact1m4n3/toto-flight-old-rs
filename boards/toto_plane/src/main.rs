@@ -382,7 +382,6 @@ async fn main(thread_spawner: Spawner) -> ! {
     realtime_spawner.spawn(task_imu_read(imu_sensor).unwrap());
 
     low_prio_spawner.spawn(task_battery(battery_sensor).unwrap());
-    low_prio_spawner.spawn(task_command_guardian().unwrap());
     low_prio_spawner.spawn(task_control_outer_loop().unwrap());
     low_prio_spawner.spawn(task_gps(gps_uart_rx).unwrap());
     low_prio_spawner.spawn(task_sensor_fusion().unwrap());
@@ -431,11 +430,6 @@ async fn task_reboot() {
 #[embassy_executor::task]
 async fn task_config(flash: AsyncFlash, range: Range<u32>) {
     fc::config::task(flash, range).await;
-}
-
-#[embassy_executor::task]
-async fn task_command_guardian() {
-    fc::control::task_command_guardian().await;
 }
 
 #[embassy_executor::task]

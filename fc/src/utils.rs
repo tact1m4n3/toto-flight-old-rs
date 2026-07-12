@@ -1,16 +1,8 @@
-use core::{
-    cell::{Cell, RefCell},
-    ops::Range,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::{cell::RefCell, ops::Range};
 
-use embassy_sync::blocking_mutex::{
-    Mutex,
-    raw::{CriticalSectionRawMutex, RawMutex},
-};
+use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
 use embassy_time::Duration;
 use embedded_io_async::BufRead;
-use heapless::Deque;
 use uom::si::{f32::Time, time::microsecond};
 
 pub const US_TO_ZERO_ONE: Mapping = Mapping {
@@ -138,46 +130,35 @@ macro_rules! assign_resources {
 struct SyncWatchState<T: Copy> {
     value: Option<T>,
     current_version: u32,
-    sender: Option<()>,
 }
 
-pub(crate) struct SyncWatch<T: Copy> {
-    state: Mutex<CriticalSectionRawMutex, RefCell<SyncWatchState<T>>>,
+pub struct SyncWatch<M: RawMutex, T: Copy> {
+    state: Mutex<M, RefCell<SyncWatchState<T>>>,
 }
 
-impl<T: Copy> SyncWatch<T> {
+impl<M: RawMutex, T: Copy> SyncWatch<M, T> {
     pub const fn new() -> Self {
         Self {
             state: Mutex::new(RefCell::new(SyncWatchState {
                 value: None,
                 current_version: 0,
-                sender: Some(()),
             })),
         }
     }
 
-    pub fn sender<'a>(&'a self) -> SyncWatchSender<'a, T> {
-        self.state
-            .lock(|state| state.borrow_mut().sender.take())
-            .unwrap();
-        SyncWatchSender { watch: self }
-    }
-
-    pub fn receiver<'a>(&'a self) -> SyncWatchReceiver<'a, T> {
-        SyncWatchReceiver {
+    pub fn watcher<'a>(&'a self) -> SyncWatchReader<'a, M, T> {
+        SyncWatchReader {
             watch: self,
             last_read_version: None,
         }
     }
-}
 
-pub struct SyncWatchSender<'a, T: Copy> {
-    watch: &'a SyncWatch<T>,
-}
+    pub fn get(&self) -> Option<T> {
+        self.state.lock(|state| state.borrow().value)
+    }
 
-impl<'a, T: Copy> SyncWatchSender<'a, T> {
-    pub fn send(&self, new_value: T) {
-        self.watch.state.lock(|state| {
+    pub fn set(&self, new_value: T) {
+        self.state.lock(|state| {
             let mut state = state.borrow_mut();
             state.value = Some(new_value);
             state.current_version = state.current_version.wrapping_add(1);
@@ -186,16 +167,12 @@ impl<'a, T: Copy> SyncWatchSender<'a, T> {
 }
 
 #[derive(Clone)]
-pub struct SyncWatchReceiver<'a, T: Copy> {
-    watch: &'a SyncWatch<T>,
+pub struct SyncWatchReader<'a, M: RawMutex, T: Copy> {
+    watch: &'a SyncWatch<M, T>,
     last_read_version: Option<u32>,
 }
 
-impl<'a, T: Copy> SyncWatchReceiver<'a, T> {
-    pub fn get(&self) -> Option<T> {
-        self.watch.state.lock(|state| state.borrow().value)
-    }
-
+impl<'a, M: RawMutex, T: Copy> SyncWatchReader<'a, M, T> {
     pub fn get_if_changed(&mut self) -> Option<T> {
         self.watch.state.lock(|state| {
             let state = state.borrow();

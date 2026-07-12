@@ -1,9 +1,11 @@
 use embassy_sync::channel::Channel;
 use embedded_io_async::{Read, ReadExactError, Write};
 
-use crate::{RawMutex, control};
+use crate::{RawMutex, control, utils::SyncWatch};
 
 static REQUESTS: Channel<RawMutex, MessageType, 8> = Channel::new();
+// NOTE: there might be a better place for this
+pub static CHANNELS: SyncWatch<RawMutex, [u16; 16]> = SyncWatch::new();
 
 pub async fn task_read<R: Read>(mut reader: R) {
     let mut buf = [0u8; 64];
@@ -30,9 +32,10 @@ pub async fn task_write<W: Write>(mut writer: W) {
         let typ = REQUESTS.receive().await;
         match typ {
             MessageType::Rc => {
-                let channels = crate::receiver::CHANNELS.get();
-                let rc = message::Rc(channels.to_msp_format());
-                rc.send(&mut writer).await.ok();
+                if let Some(channels) = CHANNELS.get() {
+                    let rc = message::Rc(channels);
+                    rc.send(&mut writer).await.ok();
+                }
             }
             MessageType::OsdCanvas => {
                 let canvas = message::OsdCanvas { cols: 50, rows: 18 };

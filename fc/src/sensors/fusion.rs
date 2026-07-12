@@ -5,12 +5,10 @@ use uom::si::{acceleration::standard_gravity, angular_velocity::radian_per_secon
 
 use crate::{
     RawMutex,
-    math::QuaternionExt,
     utils::{DurationExt, SyncWatch},
 };
 
-pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> =
-    SyncWatch::new(UnitQuaternion::IDENTITY);
+pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> = SyncWatch::new();
 
 pub async fn task() {
     const PERIOD: Duration = Duration::from_hz(100);
@@ -21,7 +19,9 @@ pub async fn task() {
     loop {
         ticker.next().await;
 
-        let imu = super::imu::DATA.get();
+        let Some(imu) = super::imu::DATA.get() else {
+            continue;
+        };
         let gyro = imu.gyro.get::<radian_per_second>();
         let accel = imu.accel.get::<standard_gravity>();
         let gyro_nwu = Vector3::new(gyro.x, -gyro.y, -gyro.z);

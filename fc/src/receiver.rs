@@ -1,31 +1,22 @@
 use core::ops::RangeInclusive;
 
 use crsf::PayloadDump;
-use embassy_sync::{signal::Signal, watch::Watch};
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
 use uom::si::{
-    electric_charge::milliampere_hour, electric_current::deciampere, electric_potential::decivolt,
-    velocity::meter_per_second,
+    angle::degree, electric_charge::milliampere_hour, electric_current::deciampere,
+    electric_potential::decivolt, length::meter, velocity::meter_per_second,
 };
 
 use crate::{
-    RawMutex,
-    control::{self, Command},
-    sensors,
+    RawMutex, control, msp, sensors,
     utils::{SyncWatch, US_TO_NEG_ONE_ONE, read_process_and_consume},
 };
 
-pub static CHANNELS: SyncWatch<RawMutex, Channels> = SyncWatch::new(Channels::DEFAULT);
-pub static COMMAND: Watch<RawMutex, Command, 1> = Watch::new();
-pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new(LinkStats {
-    uplink_link_quality: 0,
-    downlink_link_quality: 0,
-    uplink_rssi: 255,
-    downlink_rssi: 255,
-});
-static CHANNELS_RECEIVED: Signal<RawMutex, ()> = Signal::new();
+pub static COMMAND: SyncWatch<RawMutex, control::Command> = SyncWatch::new();
+pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new();
 
 #[derive(Clone, Copy, Debug)]
 pub struct LinkStats {
@@ -34,6 +25,8 @@ pub struct LinkStats {
     pub downlink_link_quality: u8,
     pub downlink_rssi: u8,
 }
+
+static CHANNELS: Signal<RawMutex, Channels> = Signal::new();
 
 pub async fn task_channels_manager() {
     let mut arm_switch = ChannelCondition {
@@ -59,11 +52,10 @@ pub async fn task_channels_manager() {
         state: false,
     };
 
-    let command_snd = COMMAND.sender();
-
     loop {
-        CHANNELS_RECEIVED.wait().await;
-        let channels = CHANNELS.get();
+        let channels = CHANNELS.wait().await;
+
+        msp::CHANNELS.set(channels.to_msp_format());
 
         arm_switch.update(&channels);
 
@@ -75,7 +67,7 @@ pub async fn task_channels_manager() {
 
         let command = if arm_switch.state {
             match flight_mode {
-                FlightMode::Manual => Command::Manual {
+                FlightMode::Manual => control::Command::Manual {
                     throttle: channels.throttle(),
                     throw: Vector3::new(
                         channels.roll() as f32 - 1500.0,
@@ -83,7 +75,7 @@ pub async fn task_channels_manager() {
                         channels.yaw() as f32 - 1500.0,
                     ),
                 },
-                FlightMode::Rate => Command::Rate {
+                FlightMode::Rate => control::Command::Rate {
                     throttle: channels.throttle(),
                     rate: Vector3::new(
                         US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 45.0,
@@ -91,17 +83,17 @@ pub async fn task_channels_manager() {
                         US_TO_NEG_ONE_ONE.map(channels.yaw() as f32) * 45.0,
                     ),
                 },
-                FlightMode::Angle => Command::Angle {
+                FlightMode::Angle => control::Command::Angle {
                     throttle: channels.throttle(),
                     roll_angle: US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 45.0,
                     pitch_angle: US_TO_NEG_ONE_ONE.map(channels.pitch() as f32) * 45.0,
                 },
             }
         } else {
-            Command::Disarmed
+            control::Command::Disarmed
         };
 
-        command_snd.send(command);
+        COMMAND.set(command);
     }
 }
 
@@ -125,8 +117,7 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
                         let raw_channels: [u16; 16] =
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
                         let channels = Channels::from_aetr1234(&raw_channels);
-                        CHANNELS.set(channels);
-                        CHANNELS_RECEIVED.signal(());
+                        CHANNELS.signal(channels);
                     }
                     crsf::Packet::LinkStatistics(ls) => {
                         let link_stats = LinkStats {
@@ -157,19 +148,20 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
 pub async fn task_telemetry<W: Write>(mut writer: W) {
     const PERIOD: Duration = Duration::from_hz(10);
 
+    let mut battery_watcher = sensors::battery::DATA.watcher();
+    let mut gps_watcher = sensors::gps::DATA.watcher();
+
     let mut ticker = Ticker::every(PERIOD);
     loop {
         ticker.next().await;
 
         let mut buf: [u8; crsf::MAX_PACKET_LEN] = [0; crsf::MAX_PACKET_LEN];
 
-        {
-            let battery = sensors::battery::DATA.get();
-
+        if let Some(battery) = battery_watcher.get_if_changed() {
             let packet = crsf::BatterySensor {
                 voltage: battery.voltage.get::<decivolt>() as i16,
                 current: battery.current.get::<deciampere>() as i16,
-                capacity_used: battery.capacity_used.get::<milliampere_hour>() as u32, // already in mAh
+                capacity_used: battery.capacity_used.get::<milliampere_hour>() as u32,
                 remaining: 0, // we don't have this info
             };
 
@@ -179,14 +171,12 @@ pub async fn task_telemetry<W: Write>(mut writer: W) {
             }
         }
 
-        {
-            let gps = sensors::gps::DATA.get();
-
+        if let Some(gps) = gps_watcher.get_if_changed() {
             let packet = crsf::Gps {
-                latitude: (gps.latitude.get::<uom::si::angle::degree>() * 1e7) as i32,
-                longitude: (gps.longitude.get::<uom::si::angle::degree>() * 1e7) as i32,
-                altitude: (gps.altitude.get::<uom::si::length::meter>() * 100.0) as u16,
-                heading: (gps.heading.get::<uom::si::angle::degree>() * 100.0) as u16,
+                latitude: (gps.latitude.get::<degree>() * 1e7) as i32,
+                longitude: (gps.longitude.get::<degree>() * 1e7) as i32,
+                altitude: (gps.altitude.get::<meter>() * 100.0) as u16,
+                heading: (gps.heading.get::<degree>() * 100.0) as u16,
                 groundspeed: (gps.velocity_over_ground.get::<meter_per_second>() * 100.0) as u16,
                 satellites: gps.num_sat,
             };

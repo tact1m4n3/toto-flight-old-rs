@@ -5,8 +5,6 @@ use uom::si::{
     length::meter, velocity::meter_per_second,
 };
 
-use super::{battery, fusion, gps, imu};
-
 pub async fn task() {
     const PERIOD: Duration = Duration::from_hz(1);
 
@@ -14,7 +12,7 @@ pub async fn task() {
     loop {
         ticker.next().await;
 
-        let battery = battery::DATA.get();
+        let battery = super::battery::DATA.get();
         info!(
             "battery: voltage={=f32}V current={=f32}A used={=f32}mAh",
             battery.voltage.get::<volt>(),
@@ -22,7 +20,7 @@ pub async fn task() {
             battery.capacity_used.get::<milliampere_hour>(),
         );
 
-        let imu = imu::DATA.get();
+        let imu = super::imu::DATA.get();
         let gyro = imu.gyro.get::<degree_per_second>();
         let accel = imu.accel.get::<standard_gravity>();
         info!(
@@ -30,7 +28,7 @@ pub async fn task() {
             gyro.x, gyro.y, gyro.z, accel.x, accel.y, accel.z,
         );
 
-        let gps = gps::DATA.get();
+        let gps = super::gps::DATA.get();
         info!(
             "gps: fix={} sats={} hdop={=f32} lat={=f32} lon={=f32} alt={=f32}m spd={=f32}m/s heading={=f32}deg vspd={=f32}m/s",
             fix_type_name(gps.fix_type),
@@ -44,7 +42,7 @@ pub async fn task() {
             gps.vertical_velocity.get::<meter_per_second>(),
         );
 
-        let attitude = fusion::ATTITUDE.get();
+        let attitude = super::fusion::ATTITUDE.get();
         let (roll, pitch, yaw) = attitude.euler_angles();
         info!(
             "attitude: roll={=f32}deg pitch={=f32}deg yaw={=f32}deg",

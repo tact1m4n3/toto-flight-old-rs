@@ -13,11 +13,13 @@ use crate::{
     config::{self, RateControllerAxisConfig, ServoMixerConfig},
     drivers::motor::{MotorOutput, ServoOutput},
     math::AngularVelocity3D,
-    receiver, sensors,
+    receiver,
+    sensors::{self, imu},
     utils::{DurationExt, GuardedRefCell},
 };
 
 // TODO: Maybe move command stuff to another module
+// TODO: Rewrite everything!!!
 
 pub static AUTO_TUNE: Signal<RawMutex, bool> = Signal::new();
 
@@ -69,24 +71,6 @@ impl ArmState {
 }
 
 #[derive(Clone, Copy)]
-pub enum Command {
-    Disarmed,
-    Manual {
-        throttle: u16,
-        throw: Vector3<f32>,
-    },
-    Rate {
-        throttle: u16,
-        rate: Vector3<f32>,
-    },
-    Angle {
-        throttle: u16,
-        roll_angle: f32,
-        pitch_angle: f32,
-    },
-}
-
-#[derive(Clone, Copy)]
 pub struct Outputs<
     const MOTORS: usize,
     const SERVOS: usize,
@@ -95,107 +79,6 @@ pub struct Outputs<
 > {
     pub motors: M,
     pub servos: S,
-}
-
-pub async fn task_command_guardian() {
-    const VALID_COMMAND_RATE: Duration = Duration::from_millis(100);
-    const FAILSAFE_MONITOR_PERIOD: Duration = Duration::from_millis(300);
-    const FAILSAFE_RECOVERY_MIN_COMMAND_RATE: Duration = Duration::from_hz(10);
-    const FAILSAFE_RECOVERY_PERIOD: Duration = Duration::from_millis(200);
-
-    let mut rc_command_rcv = receiver::COMMAND.receiver().unwrap();
-
-    'failsafe_start: loop {
-        info!("we are in failsafe");
-
-        // Disarm on failsafe
-        SHARED_STATE.lock(|state| {
-            let mut state = state.borrow_mut();
-            state.failsafe = true;
-            state.arm_state = ArmState::ArmFailed;
-            state.command = Command::Disarmed;
-        });
-
-        // In failsafe
-        let mut maybe_good_signal_timeout_start: Option<Instant> = None;
-        loop {
-            match embassy_time::with_timeout(
-                FAILSAFE_RECOVERY_MIN_COMMAND_RATE,
-                rc_command_rcv.changed(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    if let Some(good_signal_timeout_start) = maybe_good_signal_timeout_start
-                        && Instant::now() - good_signal_timeout_start >= FAILSAFE_RECOVERY_PERIOD
-                    {
-                        // We can exit failsafe now
-                        break;
-                    } else if maybe_good_signal_timeout_start.is_none() {
-                        maybe_good_signal_timeout_start = Some(Instant::now());
-                    }
-                }
-                Err(_) => maybe_good_signal_timeout_start = None,
-            }
-        }
-
-        info!("failsafe has come to an end");
-        SHARED_STATE.lock(|state| {
-            state.borrow_mut().failsafe = false;
-        });
-
-        loop {
-            // Receive command loop. No failsafe in sight
-            while let Ok(command) =
-                embassy_time::with_timeout(VALID_COMMAND_RATE, rc_command_rcv.changed()).await
-            {
-                SHARED_STATE.lock(|shared_state| {
-                    let mut shared_state = shared_state.borrow_mut();
-
-                    // Arm state transitions
-                    match shared_state.arm_state {
-                        ArmState::Disarmed => match command {
-                            Command::Manual { throttle, .. }
-                            | Command::Rate { throttle, .. }
-                            | Command::Angle { throttle, .. } => {
-                                if throttle < 1100 && shared_state.arm_blockers == 0 {
-                                    info!("armed");
-                                    shared_state.arm_state = ArmState::Armed;
-                                } else {
-                                    info!("arming failed");
-                                    shared_state.arm_state = ArmState::ArmFailed;
-                                }
-                            }
-                            Command::Disarmed => (),
-                        },
-                        ArmState::Armed | ArmState::ArmFailed => {
-                            if let Command::Disarmed = command {
-                                info!("disarmed");
-                                shared_state.arm_state = ArmState::Disarmed;
-                            }
-                        }
-                    }
-
-                    shared_state.command = if shared_state.arm_state == ArmState::Armed {
-                        command
-                    } else {
-                        Command::Disarmed
-                    };
-                });
-            }
-
-            info!("failsafe detect stage 1");
-
-            // Maybe we are in failsafe, do we receive any more packets in this recovery period?
-            if embassy_time::with_timeout(FAILSAFE_MONITOR_PERIOD, rc_command_rcv.changed())
-                .await
-                .is_err()
-            {
-                // No command received in the failsafe monitor period, so we enter failsafe again
-                continue 'failsafe_start;
-            }
-        }
-    }
 }
 
 struct InnerLoopState<const MOTORS: usize, const SERVOS: usize> {
@@ -226,11 +109,15 @@ pub async fn task_inner_loop<
     let rate_control = async {
         const PERIOD: Duration = Duration::from_hz(500);
 
+        let mut command_guardian = CommandGuardian::new(Instant::now());
+
         let mut ticker = Ticker::every(PERIOD);
         loop {
             ticker.next().await;
 
             state.guarded_mut(|state| {
+                command_guardian.update(receiver::COMMAND.get(), Instant::now());
+
                 let (command, slow_loop_target_rate) = SHARED_STATE.lock(|shared_state| {
                     let shared_state = shared_state.borrow_mut();
                     (
@@ -257,12 +144,19 @@ pub async fn task_inner_loop<
                                 };
 
                             maybe_rate_control.map(|rate_control| {
-                                let sensors::imu::Data { gyro, .. } = sensors::imu::DATA.get();
-                                rate_control.target_manual(
-                                    &mut state.rate_controller,
-                                    gyro.get::<degree_per_second>(),
-                                    PERIOD.dt_f32(),
-                                )
+                                // TODO: this is temporary. implement system to detect missing data and disarm
+                                if let Some(imu::Data { gyro, .. }) = imu::DATA.get() {
+                                    rate_control.target_manual(
+                                        &mut state.rate_controller,
+                                        gyro.get::<degree_per_second>(),
+                                        PERIOD.dt_f32(),
+                                    )
+                                } else {
+                                    ManualControl {
+                                        throttle: 1000,
+                                        throw: Vector3::zeros(),
+                                    }
+                                }
                             })
                         }
                     };
@@ -355,23 +249,138 @@ pub async fn task_outer_loop() {
                 throttle,
                 roll_angle,
                 pitch_angle,
-            } => {
-                let attitude = sensors::fusion::ATTITUDE.get();
-
-                Some(
-                    AngleControl {
-                        throttle,
-                        roll_angle,
-                        pitch_angle,
-                    }
-                    .target_rate(&attitude),
-                )
-            }
+            } => sensors::fusion::ATTITUDE.get().map(|attitude| {
+                AngleControl {
+                    throttle,
+                    roll_angle,
+                    pitch_angle,
+                }
+                .target_rate(&attitude)
+            }),
             _ => None,
         };
 
         SHARED_STATE.lock(|shared_state| {
             shared_state.borrow_mut().slow_loop_target_rate = slow_loop_target_rate;
+        });
+    }
+}
+
+pub struct CommandGuardian {
+    state: GuardianState,
+    last_command_at: Instant,
+}
+
+enum GuardianState {
+    Failsafe { good_signal_since: Option<Instant> },
+    Normal,
+}
+
+impl CommandGuardian {
+    const VALID_COMMAND_RATE: Duration = Duration::from_millis(100);
+    const FAILSAFE_MONITOR_PERIOD: Duration = Duration::from_millis(300);
+    // Total silence tolerated in Normal before declaring failsafe.
+    // (mirrors the old 100ms "stall" + 300ms "monitor" two-stage wait)
+    const FAILSAFE_TRIGGER_TIMEOUT: Duration = Duration::from_millis(
+        Self::VALID_COMMAND_RATE.as_millis() + Self::FAILSAFE_MONITOR_PERIOD.as_millis(),
+    );
+
+    const FAILSAFE_RECOVERY_MIN_COMMAND_RATE: Duration = Duration::from_hz(10);
+    const FAILSAFE_RECOVERY_PERIOD: Duration = Duration::from_millis(200);
+
+    pub fn new(now: Instant) -> Self {
+        Self::enter_failsafe();
+        Self {
+            state: GuardianState::Failsafe {
+                good_signal_since: None,
+            },
+            last_command_at: now,
+        }
+    }
+
+    pub fn update(&mut self, command: Option<Command>, now: Instant) {
+        if command.is_some() {
+            self.last_command_at = now;
+        }
+
+        match &mut self.state {
+            GuardianState::Failsafe { good_signal_since } => match command {
+                Some(cmd) => {
+                    match *good_signal_since {
+                        Some(since) if now - since >= Self::FAILSAFE_RECOVERY_PERIOD => {
+                            Self::exit_failsafe();
+                            self.state = GuardianState::Normal;
+                            // process this command immediately under the new state
+                            Self::process_command(cmd);
+                        }
+                        None => *good_signal_since = Some(now),
+                        _ => {} // still accumulating a good streak
+                    }
+                }
+                None => {
+                    if now - self.last_command_at >= Self::FAILSAFE_RECOVERY_MIN_COMMAND_RATE {
+                        *good_signal_since = None;
+                    }
+                }
+            },
+            GuardianState::Normal => {
+                if let Some(cmd) = command {
+                    Self::process_command(cmd);
+                } else if now - self.last_command_at >= Self::FAILSAFE_TRIGGER_TIMEOUT {
+                    Self::enter_failsafe();
+                    self.state = GuardianState::Failsafe {
+                        good_signal_since: None,
+                    };
+                }
+            }
+        }
+    }
+
+    fn enter_failsafe() {
+        info!("we are in failsafe");
+        SHARED_STATE.lock(|state| {
+            let mut state = state.borrow_mut();
+            state.failsafe = true;
+            state.arm_state = ArmState::ArmFailed;
+            state.command = Command::Disarmed;
+        });
+    }
+
+    fn exit_failsafe() {
+        info!("failsafe has come to an end");
+        SHARED_STATE.lock(|state| state.borrow_mut().failsafe = false);
+    }
+
+    fn process_command(command: Command) {
+        SHARED_STATE.lock(|shared_state| {
+            let mut shared_state = shared_state.borrow_mut();
+            match shared_state.arm_state {
+                ArmState::Disarmed => match command {
+                    Command::Manual { throttle, .. }
+                    | Command::Rate { throttle, .. }
+                    | Command::Angle { throttle, .. } => {
+                        if throttle < 1100 && shared_state.arm_blockers == 0 {
+                            info!("armed");
+                            shared_state.arm_state = ArmState::Armed;
+                        } else {
+                            info!("arming failed");
+                            shared_state.arm_state = ArmState::ArmFailed;
+                        }
+                    }
+                    Command::Disarmed => (),
+                },
+                ArmState::Armed | ArmState::ArmFailed => {
+                    if let Command::Disarmed = command {
+                        info!("disarmed");
+                        shared_state.arm_state = ArmState::Disarmed;
+                    }
+                }
+            }
+            shared_state.command = if shared_state.arm_state == ArmState::Armed {
+                command
+            } else {
+                Command::Disarmed
+            };
         });
     }
 }
@@ -404,6 +413,24 @@ impl Drop for ArmBlocker {
             shared_state.arm_blockers -= 1;
         });
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum Command {
+    Disarmed,
+    Manual {
+        throttle: u16,
+        throw: Vector3<f32>,
+    },
+    Rate {
+        throttle: u16,
+        rate: Vector3<f32>,
+    },
+    Angle {
+        throttle: u16,
+        roll_angle: f32,
+        pitch_angle: f32,
+    },
 }
 
 struct AngleControl {

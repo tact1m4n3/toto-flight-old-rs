@@ -1,13 +1,10 @@
 use embedded_io_async::BufRead;
-use uom::{
-    ConstZero,
-    si::{
-        angle::degree,
-        f32::{Angle as AngleF32, Length, Velocity},
-        f64::Angle as AngleF64,
-        length::meter,
-        velocity::meter_per_second,
-    },
+use uom::si::{
+    angle::degree,
+    f32::{Angle as AngleF32, Length, Velocity},
+    f64::Angle as AngleF64,
+    length::meter,
+    velocity::meter_per_second,
 };
 
 use crate::RawMutex;
@@ -15,27 +12,22 @@ use ublox::{FixedBuffer, Parser, UbxPacket, packets::packetref_proto33::PacketRe
 
 use crate::utils::{SyncWatch, read_process_and_consume};
 
-pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new(Data {
-    latitude: AngleF64::ZERO,
-    longitude: AngleF64::ZERO,
-    altitude: Length::ZERO,
-    h_acc: Length {
-        dimension: core::marker::PhantomData,
-        units: core::marker::PhantomData,
-        value: f32::INFINITY,
-    },
-    v_acc: Length {
-        dimension: core::marker::PhantomData,
-        units: core::marker::PhantomData,
-        value: f32::INFINITY,
-    },
-    velocity_over_ground: Velocity::ZERO,
-    heading: AngleF32::ZERO,
-    num_sat: 0,
-    hdop: f32::INFINITY,
-    fix_type: FixType::Undefined,
-    vertical_velocity: Velocity::ZERO,
-});
+pub static DATA: SyncWatch<RawMutex, Data> = SyncWatch::new();
+
+#[derive(Clone, Copy, Debug)]
+pub struct Data {
+    pub latitude: AngleF64,
+    pub longitude: AngleF64,
+    pub altitude: Length,
+    pub h_acc: Length,
+    pub v_acc: Length,
+    pub velocity_over_ground: Velocity,
+    pub heading: AngleF32,
+    pub num_sat: u8,
+    pub hdop: f32,
+    pub fix_type: FixType,
+    pub vertical_velocity: Velocity,
+}
 
 pub async fn task<R: BufRead>(mut reader: R) {
     let mut parser: ublox::Parser<FixedBuffer<128>> = Parser::new_fixed();
@@ -78,32 +70,6 @@ pub async fn task<R: BufRead>(mut reader: R) {
             warn!("failed to read from uart");
         }
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Data {
-    /// Latitude in degrees (positive = North)
-    pub latitude: AngleF64,
-    /// Longitude in degrees (positive = East)
-    pub longitude: AngleF64,
-    /// Altitude above ellipsoid in meters
-    pub altitude: Length,
-    /// Horizontal accuracy estimate in meters
-    pub h_acc: Length,
-    /// Vertical accuracy estimate in meters
-    pub v_acc: Length,
-    /// Speed over ground in m/s
-    pub velocity_over_ground: Velocity,
-    /// Course over ground in degrees (0-360)
-    pub heading: AngleF32,
-    /// Number of satellites in use
-    pub num_sat: u8,
-    /// Horizontal dilution of precision
-    pub hdop: f32,
-    /// Fix type
-    pub fix_type: FixType,
-    /// Vertical velocity (speed downward) in m/s
-    pub vertical_velocity: Velocity,
 }
 
 #[derive(Clone, Copy, Debug)]

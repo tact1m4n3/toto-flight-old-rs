@@ -6,9 +6,9 @@ use zerocopy::{I32, Immutable, IntoBytes, KnownLayout};
 
 use crate::utils::pack;
 
-use embedded_io::Write;
+use embedded_io_async::Write;
 
-pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
+pub async fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
     let t = Instant::now().as_micros();
 
     write_fmt_msg(
@@ -18,7 +18,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "FMT",
         "BBnNZ",
         "Type,Length,Name,Format,Columns",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_UNIT,
@@ -26,7 +27,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "UNIT",
         "QbZ",
         "TimeUS,Id,Label",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_MULT,
@@ -34,7 +36,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "MULT",
         "QbQ",
         "TimeUS,Id,Mult",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_FMTU,
@@ -42,7 +45,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "FMTU",
         "QBNN",
         "TimeUS,FmtType,UnitIds,MultIds",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_MSG,
@@ -50,7 +54,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "MSG",
         "QZ",
         "TimeUS,Message",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_PARM,
@@ -58,7 +63,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "PARM",
         "QNd",
         "TimeUS,Name,Value",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_ACCEL,
@@ -66,7 +72,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "ACC",
         "Qfff",
         "TimeUS,AccX,AccY,AccZ",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_GYRO,
@@ -74,7 +81,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "GYR",
         "Qfff",
         "TimeUS,GyrX,GyrY,GyrZ",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_GPS,
@@ -82,7 +90,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "GPS",
         "QBBfLLffff",
         "TimeUS,Status,NSats,HDop,Lat,Lng,Alt,Spd,GCrs,VZ",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_BATTERY,
@@ -90,7 +99,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "BAT",
         "Qfff",
         "TimeUS,Volt,Curr,CurrTot",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_RC_CHANNELS,
@@ -98,7 +108,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "RCIN",
         "QHHHHHHHHHHHHHHHH",
         "TimeUS,C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,C14,C15,C16",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_RC_LINK_STATS,
@@ -106,7 +117,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "RSL",
         "QBBBB",
         "TimeUS,UplinkLinkQuality,UplinkRSSI,DownlinkLinkQuality,DownlinkRSSI",
-    )?;
+    )
+    .await?;
     write_fmt_msg(
         writer,
         TYPE_ATTITUDE,
@@ -114,7 +126,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
         "ATT",
         "Qfff",
         "TimeUS,Roll,Pitch,Yaw",
-    )?;
+    )
+    .await?;
 
     for (id, label) in [
         (b's', "s"),
@@ -139,7 +152,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
                 id,
                 label: pack(label),
             },
-        )?;
+        )
+        .await?;
     }
 
     for (id, val) in [(b'F', 1e-6_f64), (b'0', 1.0_f64), (b'-', 0.0_f64)] {
@@ -152,7 +166,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
                 id,
                 val: val.to_le_bytes(),
             },
-        )?;
+        )
+        .await?;
     }
 
     for fmtu in [
@@ -206,7 +221,7 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
             mults: pack("F-000"),
         },
     ] {
-        write(writer, &fmtu)?;
+        write(writer, &fmtu).await?;
     }
 
     write(
@@ -217,7 +232,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
             time_us: U64::new(t),
             message: pack("Toto Plane"), // TODO: change for cfg craft name
         },
-    )?;
+    )
+    .await?;
 
     write(
         writer,
@@ -228,7 +244,8 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
             name: pack("LOG_VERSION"),
             value: 1.0_f64.to_le_bytes(),
         },
-    )?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -245,7 +262,7 @@ pub fn write_header<W: Write>(writer: &mut W) -> Result<(), W::Error> {
 //     )
 // }
 
-pub fn write_accel<W: Write>(
+pub async fn write_accel<W: Write>(
     writer: &mut W,
     time_us: u64,
     accel: Vector3<f32>,
@@ -261,9 +278,10 @@ pub fn write_accel<W: Write>(
             accel_z: F32::new(accel.z),
         },
     )
+    .await
 }
 
-pub fn write_gyro<W: Write>(
+pub async fn write_gyro<W: Write>(
     writer: &mut W,
     time_us: u64,
     gyro: Vector3<f32>,
@@ -279,10 +297,11 @@ pub fn write_gyro<W: Write>(
             gyro_z: F32::new(gyro.z),
         },
     )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write_gps<W: Write>(
+pub async fn write_gps<W: Write>(
     writer: &mut W,
     time_us: u64,
     status: u8,
@@ -312,9 +331,10 @@ pub fn write_gps<W: Write>(
             vz: F32::new(vz),
         },
     )
+    .await
 }
 
-pub fn write_bat<W: Write>(
+pub async fn write_bat<W: Write>(
     writer: &mut W,
     time_us: u64,
     volt: f32,
@@ -332,9 +352,10 @@ pub fn write_bat<W: Write>(
             curr_tot: F32::new(curr_tot),
         },
     )
+    .await
 }
 
-pub fn write_rc_channels<W: Write>(
+pub async fn write_rc_channels<W: Write>(
     writer: &mut W,
     time_us: u64,
     channels: &[u16; 16],
@@ -348,9 +369,10 @@ pub fn write_rc_channels<W: Write>(
             channels: channels.map(U16::new),
         },
     )
+    .await
 }
 
-pub fn write_rc_link_stats<W: Write>(
+pub async fn write_rc_link_stats<W: Write>(
     writer: &mut W,
     time_us: u64,
     uplink_link_quality: u8,
@@ -370,9 +392,10 @@ pub fn write_rc_link_stats<W: Write>(
             downlink_rssi,
         },
     )
+    .await
 }
 
-pub fn write_attitude<W: Write>(
+pub async fn write_attitude<W: Write>(
     writer: &mut W,
     time_us: u64,
     roll: f32,
@@ -390,13 +413,17 @@ pub fn write_attitude<W: Write>(
             yaw: F32::new(yaw),
         },
     )
+    .await
 }
 
-fn write<W: Write, T: IntoBytes + Immutable>(writer: &mut W, msg: &T) -> Result<(), W::Error> {
-    writer.write_all(msg.as_bytes())
+async fn write<W: Write, T: IntoBytes + Immutable>(
+    writer: &mut W,
+    msg: &T,
+) -> Result<(), W::Error> {
+    writer.write_all(msg.as_bytes()).await
 }
 
-fn write_fmt_msg<W: Write>(
+async fn write_fmt_msg<W: Write>(
     writer: &mut W,
     type_id: u8,
     length: u8,
@@ -416,6 +443,7 @@ fn write_fmt_msg<W: Write>(
             columns: pack(columns),
         },
     )
+    .await
 }
 
 const SYNC: [u8; 2] = [0xA3, 0x95];
