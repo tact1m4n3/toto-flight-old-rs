@@ -1,0 +1,598 @@
+use core::cell::RefCell;
+
+use embassy_futures::select::{Either, select};
+use embassy_sync::{blocking_mutex::Mutex, signal::Signal};
+use embassy_time::{Duration, Instant, Ticker};
+use futures::join;
+use nalgebra::{UnitQuaternion, Vector3};
+use num_traits::Float;
+use uom::si::angular_velocity::{degree_per_second, radian_per_second};
+
+use crate::{
+    RawMutex,
+    config::{self, RateControllerAxisConfig, ServoMixerConfig},
+    drivers::motor::{MotorOutput, ServoOutput},
+    math::AngularVelocity3D,
+    receiver,
+    sensors::{self, imu},
+    utils::{DurationExt, GuardedRefCell},
+};
+
+// TODO: Maybe move command stuff to another module
+// TODO: Rewrite everything!!!
+
+pub static AUTO_TUNE: Signal<RawMutex, bool> = Signal::new();
+
+static SHARED_STATE: Mutex<RawMutex, RefCell<SharedState>> =
+    Mutex::new(RefCell::new(SharedState {
+        arm_state: ArmState::ArmFailed,
+        arm_blockers: 0,
+        failsafe: true,
+
+        command: Command::Disarmed,
+        slow_loop_target_rate: None,
+    }));
+
+struct SharedState {
+    arm_state: ArmState,
+    arm_blockers: u32,
+    failsafe: bool,
+
+    command: Command,
+    slow_loop_target_rate: Option<RateControl>,
+}
+
+pub fn status() -> Status {
+    SHARED_STATE.lock(|state| {
+        let state = state.borrow();
+        Status {
+            arm_state: state.arm_state,
+            failsafe: state.failsafe,
+        }
+    })
+}
+
+pub struct Status {
+    pub arm_state: ArmState,
+    pub failsafe: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ArmState {
+    Disarmed,
+    Armed,
+    ArmFailed,
+}
+
+impl ArmState {
+    pub fn is_armed(self) -> bool {
+        self == ArmState::Armed
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Outputs<
+    const MOTORS: usize,
+    const SERVOS: usize,
+    M: MotorOutput<MOTORS>,
+    S: ServoOutput<SERVOS>,
+> {
+    pub motors: M,
+    pub servos: S,
+}
+
+struct InnerLoopState<const MOTORS: usize, const SERVOS: usize> {
+    rate_controller: RateController,
+    servo_mixer_config: [ServoMixerConfig; SERVOS],
+}
+
+pub async fn task_inner_loop<
+    const MOTORS: usize,
+    const SERVOS: usize,
+    M: MotorOutput<MOTORS>,
+    S: ServoOutput<SERVOS>,
+>(
+    mut outputs: Outputs<MOTORS, SERVOS, M, S>,
+) {
+    let cfg = config::INITIAL.get().await;
+
+    let state: GuardedRefCell<InnerLoopState<MOTORS, SERVOS>> =
+        GuardedRefCell::new(InnerLoopState {
+            rate_controller: RateController {
+                roll: AxisRateController::new(cfg.rate_controller_config.roll),
+                pitch: AxisRateController::new(cfg.rate_controller_config.pitch),
+                yaw: AxisRateController::new(cfg.rate_controller_config.yaw),
+            },
+            servo_mixer_config: core::array::from_fn(|i| cfg.servos_config[i]),
+        });
+
+    let rate_control = async {
+        const PERIOD: Duration = Duration::from_hz(500);
+
+        let mut command_guardian = CommandGuardian::new(Instant::now());
+
+        let mut ticker = Ticker::every(PERIOD);
+        loop {
+            ticker.next().await;
+
+            state.guarded_mut(|state| {
+                command_guardian.update(receiver::COMMAND.get(), Instant::now());
+
+                let (command, slow_loop_target_rate) = SHARED_STATE.lock(|shared_state| {
+                    let shared_state = shared_state.borrow_mut();
+                    (
+                        shared_state.command,
+                        shared_state.slow_loop_target_rate.clone(),
+                    )
+                });
+
+                if let Command::Disarmed = command {
+                    outputs.motors.disarm();
+                } else {
+                    // Will be `None` only if the passthrough rate_control from the slow loop is late
+                    let maybe_manual_control = match command {
+                        Command::Disarmed => unreachable!(),
+                        Command::Manual { throttle, throw } => {
+                            Some(ManualControl { throttle, throw })
+                        }
+                        _ => {
+                            let maybe_rate_control =
+                                if let Command::Rate { throttle, rate } = command {
+                                    Some(RateControl { throttle, rate })
+                                } else {
+                                    slow_loop_target_rate
+                                };
+
+                            maybe_rate_control.map(|rate_control| {
+                                // TODO: this is temporary. implement system to detect missing data and disarm
+                                if let Some(imu::Data { gyro, .. }) = imu::DATA.get() {
+                                    rate_control.target_manual(
+                                        &mut state.rate_controller,
+                                        gyro.get::<degree_per_second>(),
+                                        PERIOD.dt_f32(),
+                                    )
+                                } else {
+                                    ManualControl {
+                                        throttle: 1000,
+                                        throw: Vector3::zeros(),
+                                    }
+                                }
+                            })
+                        }
+                    };
+
+                    if let Some(manual_control) = maybe_manual_control {
+                        manual_control
+                            .mix(cfg.servo_max_throw_us, &state.servo_mixer_config)
+                            .apply(&mut outputs);
+                    }
+                }
+            });
+        }
+    };
+
+    let auto_tune = async {
+        // TODO: feedback on which state is active through osd or telemetry
+
+        loop {
+            // Waiting to start mid point calibration, requires the drone to be armed
+            loop {
+                if AUTO_TUNE.wait().await && status().arm_state.is_armed() {
+                    break;
+                }
+            }
+
+            // Mid point tuning
+            {
+                let mut ticker = Ticker::every(Duration::from_hz(1));
+                loop {
+                    match select(AUTO_TUNE.wait(), ticker.next()).await {
+                        Either::First(enable) if !enable => break,
+                        _ => (),
+                    }
+
+                    state.guarded_mut(|state| {
+                        if SHARED_STATE.lock(|state| state.borrow().arm_state.is_armed()) {
+                            let i_term = state.rate_controller.i_term();
+                            state.rate_controller.reset_i_term();
+
+                            // this should have no side-effect as the i_term is reset
+                            for cfg in state.servo_mixer_config.iter_mut() {
+                                cfg.mid_point_us = cfg
+                                    .mid_point_us
+                                    .wrapping_add_signed(i_term.dot(&cfg.mixer_gain) as i16)
+                                    .clamp(cfg.trim_min_us, cfg.trim_max_us);
+                            }
+                        }
+                    });
+                }
+            }
+
+            // TODO: add auto ff tuning
+
+            // Waiting for config to be applied, requires the drone to be disarmed
+            let _arm_guard = loop {
+                if AUTO_TUNE.wait().await
+                    && let Ok(arm_guard) = ArmBlocker::new()
+                {
+                    break arm_guard;
+                }
+            };
+
+            let servo_mixer_config = state.guarded_ref(|state| state.servo_mixer_config);
+            for (i, cfg) in servo_mixer_config.iter().enumerate() {
+                config::UpdateItem::ServoMixerConfig {
+                    index: i as u8,
+                    config: *cfg,
+                }
+                .commit()
+                .await
+                .ok();
+            }
+        }
+    };
+
+    join!(rate_control, auto_tune);
+}
+
+pub async fn task_outer_loop() {
+    const PERIOD: Duration = Duration::from_hz(100);
+
+    let mut ticker = Ticker::every(PERIOD);
+    loop {
+        ticker.next().await;
+
+        let command = SHARED_STATE.lock(|shared_state| shared_state.borrow().command);
+
+        let slow_loop_target_rate = match command {
+            Command::Angle {
+                throttle,
+                roll_angle,
+                pitch_angle,
+            } => sensors::fusion::ATTITUDE.get().map(|attitude| {
+                AngleControl {
+                    throttle,
+                    roll_angle,
+                    pitch_angle,
+                }
+                .target_rate(&attitude)
+            }),
+            _ => None,
+        };
+
+        SHARED_STATE.lock(|shared_state| {
+            shared_state.borrow_mut().slow_loop_target_rate = slow_loop_target_rate;
+        });
+    }
+}
+
+pub struct CommandGuardian {
+    state: GuardianState,
+    last_command_at: Instant,
+}
+
+enum GuardianState {
+    Failsafe { good_signal_since: Option<Instant> },
+    Normal,
+}
+
+impl CommandGuardian {
+    const VALID_COMMAND_RATE: Duration = Duration::from_millis(100);
+    const FAILSAFE_MONITOR_PERIOD: Duration = Duration::from_millis(300);
+    // Total silence tolerated in Normal before declaring failsafe.
+    // (mirrors the old 100ms "stall" + 300ms "monitor" two-stage wait)
+    const FAILSAFE_TRIGGER_TIMEOUT: Duration = Duration::from_millis(
+        Self::VALID_COMMAND_RATE.as_millis() + Self::FAILSAFE_MONITOR_PERIOD.as_millis(),
+    );
+
+    const FAILSAFE_RECOVERY_MIN_COMMAND_RATE: Duration = Duration::from_hz(10);
+    const FAILSAFE_RECOVERY_PERIOD: Duration = Duration::from_millis(200);
+
+    pub fn new(now: Instant) -> Self {
+        Self::enter_failsafe();
+        Self {
+            state: GuardianState::Failsafe {
+                good_signal_since: None,
+            },
+            last_command_at: now,
+        }
+    }
+
+    pub fn update(&mut self, command: Option<Command>, now: Instant) {
+        if command.is_some() {
+            self.last_command_at = now;
+        }
+
+        match &mut self.state {
+            GuardianState::Failsafe { good_signal_since } => match command {
+                Some(cmd) => {
+                    match *good_signal_since {
+                        Some(since) if now - since >= Self::FAILSAFE_RECOVERY_PERIOD => {
+                            Self::exit_failsafe();
+                            self.state = GuardianState::Normal;
+                            // process this command immediately under the new state
+                            Self::process_command(cmd);
+                        }
+                        None => *good_signal_since = Some(now),
+                        _ => {} // still accumulating a good streak
+                    }
+                }
+                None => {
+                    if now - self.last_command_at >= Self::FAILSAFE_RECOVERY_MIN_COMMAND_RATE {
+                        *good_signal_since = None;
+                    }
+                }
+            },
+            GuardianState::Normal => {
+                if let Some(cmd) = command {
+                    Self::process_command(cmd);
+                } else if now - self.last_command_at >= Self::FAILSAFE_TRIGGER_TIMEOUT {
+                    Self::enter_failsafe();
+                    self.state = GuardianState::Failsafe {
+                        good_signal_since: None,
+                    };
+                }
+            }
+        }
+    }
+
+    fn enter_failsafe() {
+        info!("we are in failsafe");
+        SHARED_STATE.lock(|state| {
+            let mut state = state.borrow_mut();
+            state.failsafe = true;
+            state.arm_state = ArmState::ArmFailed;
+            state.command = Command::Disarmed;
+        });
+    }
+
+    fn exit_failsafe() {
+        info!("failsafe has come to an end");
+        SHARED_STATE.lock(|state| state.borrow_mut().failsafe = false);
+    }
+
+    fn process_command(command: Command) {
+        SHARED_STATE.lock(|shared_state| {
+            let mut shared_state = shared_state.borrow_mut();
+            match shared_state.arm_state {
+                ArmState::Disarmed => match command {
+                    Command::Manual { throttle, .. }
+                    | Command::Rate { throttle, .. }
+                    | Command::Angle { throttle, .. } => {
+                        if throttle < 1100 && shared_state.arm_blockers == 0 {
+                            info!("armed");
+                            shared_state.arm_state = ArmState::Armed;
+                        } else {
+                            info!("arming failed");
+                            shared_state.arm_state = ArmState::ArmFailed;
+                        }
+                    }
+                    Command::Disarmed => (),
+                },
+                ArmState::Armed | ArmState::ArmFailed => {
+                    if let Command::Disarmed = command {
+                        info!("disarmed");
+                        shared_state.arm_state = ArmState::Disarmed;
+                    }
+                }
+            }
+            shared_state.command = if shared_state.arm_state == ArmState::Armed {
+                command
+            } else {
+                Command::Disarmed
+            };
+        });
+    }
+}
+
+#[derive(Debug)]
+pub struct CraftArmed;
+
+pub struct ArmBlocker(());
+
+impl ArmBlocker {
+    pub fn new() -> Result<Self, CraftArmed> {
+        SHARED_STATE.lock(|shared_state| {
+            let mut shared_state = shared_state.borrow_mut();
+            if shared_state.arm_state != ArmState::Armed {
+                shared_state.arm_blockers += 1;
+                Ok(Self(()))
+            } else {
+                Err(CraftArmed)
+            }
+        })
+    }
+}
+
+impl Drop for ArmBlocker {
+    fn drop(&mut self) {
+        SHARED_STATE.lock(|shared_state| {
+            let mut shared_state = shared_state.borrow_mut();
+            assert!(shared_state.arm_blockers > 0);
+            assert!(shared_state.arm_state != ArmState::Armed);
+            shared_state.arm_blockers -= 1;
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Command {
+    Disarmed,
+    Manual {
+        throttle: u16,
+        throw: Vector3<f32>,
+    },
+    Rate {
+        throttle: u16,
+        rate: Vector3<f32>,
+    },
+    Angle {
+        throttle: u16,
+        roll_angle: f32,
+        pitch_angle: f32,
+    },
+}
+
+struct AngleControl {
+    throttle: u16,
+    roll_angle: f32,
+    pitch_angle: f32,
+}
+
+impl AngleControl {
+    fn target_rate(self, attitude: &UnitQuaternion<f32>) -> RateControl {
+        const ANGLE_ROLL_KP: f32 = 0.5;
+        const ANGLE_PITCH_KP: f32 = 0.5;
+
+        let world_up = -Vector3::z();
+        let body_up = attitude.inverse_transform_vector(&world_up);
+        let target_up = UnitQuaternion::from_euler_angles(self.roll_angle, self.pitch_angle, 0.0)
+            .inverse_transform_vector(&world_up);
+
+        let correction_rate = {
+            let cross = body_up.cross(&target_up);
+            let dot = body_up.dot(&target_up).clamp(-1.0, 1.0);
+
+            let angle = dot.atan2(cross.norm());
+
+            let angle_error_radians = cross
+                .try_normalize(1e-6)
+                .map_or(Vector3::zeros(), |cross_normalized| {
+                    cross_normalized * angle
+                });
+
+            AngularVelocity3D::new::<radian_per_second>(
+                angle_error_radians.x * ANGLE_ROLL_KP,
+                angle_error_radians.y * ANGLE_PITCH_KP,
+                0.0,
+            )
+        };
+
+        RateControl {
+            throttle: self.throttle,
+            rate: correction_rate.get::<degree_per_second>(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RateControl {
+    throttle: u16,
+    /// Target rate in dps
+    rate: Vector3<f32>,
+}
+
+impl RateControl {
+    fn target_manual(
+        self,
+        rate_controller: &mut RateController,
+        gyro: Vector3<f32>,
+        dt: f32,
+    ) -> ManualControl {
+        let Self { throttle, rate } = self;
+        ManualControl {
+            throttle,
+            throw: rate_controller.update(rate, gyro, dt),
+        }
+    }
+}
+
+struct ManualControl {
+    throttle: u16,
+    throw: Vector3<f32>,
+}
+
+impl ManualControl {
+    fn mix<const MOTORS: usize, const SERVOS: usize>(
+        self,
+        servo_max_throw_us: u16,
+        servos_cfg: &[ServoMixerConfig; SERVOS],
+    ) -> ActuatorOutput<MOTORS, SERVOS> {
+        let Self { throttle, throw } = self;
+
+        ActuatorOutput {
+            motors: [throttle; MOTORS],
+            servos: core::array::from_fn(|i| {
+                let servo_throw = throw.dot(&servos_cfg[i].mixer_gain) as i16;
+                let servo_throw =
+                    servo_throw.clamp(-(servo_max_throw_us as i16), servo_max_throw_us as i16);
+                servos_cfg[i]
+                    .mid_point_us
+                    .wrapping_add_signed(servo_throw)
+                    .clamp(servos_cfg[i].trim_min_us, servos_cfg[i].trim_max_us)
+            }),
+        }
+    }
+}
+
+struct ActuatorOutput<const MOTORS: usize, const SERVOS: usize> {
+    motors: [u16; MOTORS],
+    servos: [u16; SERVOS],
+}
+
+impl<const MOTORS: usize, const SERVOS: usize> ActuatorOutput<MOTORS, SERVOS> {
+    fn apply<M: MotorOutput<MOTORS>, S: ServoOutput<SERVOS>>(
+        self,
+        outputs: &mut Outputs<MOTORS, SERVOS, M, S>,
+    ) {
+        outputs.motors.write(&self.motors);
+        outputs.servos.write(&self.servos);
+    }
+}
+
+struct AxisRateController {
+    cfg: RateControllerAxisConfig,
+    i_term: f32,
+}
+
+impl AxisRateController {
+    fn new(cfg: RateControllerAxisConfig) -> Self {
+        Self { cfg, i_term: 0.0 }
+    }
+
+    fn update(&mut self, target_rate: f32, current_rate: f32, dt: f32) -> f32 {
+        const I_TERM_MAX_ERROR: f32 = 50.0;
+
+        let error = target_rate - current_rate;
+
+        let ff_term = self.cfg.kff * target_rate;
+        let p_term = self.cfg.kp * error;
+
+        if error.abs() <= I_TERM_MAX_ERROR {
+            self.i_term += self.cfg.ki * error * dt;
+        }
+
+        ff_term + p_term + self.i_term
+    }
+}
+
+struct RateController {
+    roll: AxisRateController,
+    pitch: AxisRateController,
+    yaw: AxisRateController,
+}
+
+impl RateController {
+    fn i_term(&self) -> Vector3<f32> {
+        Vector3::new(self.roll.i_term, self.pitch.i_term, self.yaw.i_term)
+    }
+
+    fn reset_i_term(&mut self) {
+        self.roll.i_term = 0.0;
+        self.pitch.i_term = 0.0;
+        self.yaw.i_term = 0.0;
+    }
+
+    fn update(
+        &mut self,
+        target_rate: Vector3<f32>,
+        current_rate: Vector3<f32>,
+        dt: f32,
+    ) -> Vector3<f32> {
+        Vector3::new(
+            self.roll.update(target_rate.x, current_rate.x, dt),
+            self.pitch.update(target_rate.y, current_rate.y, dt),
+            self.yaw.update(target_rate.z, current_rate.z, dt),
+        )
+    }
+}

@@ -13,7 +13,7 @@ pub static ATTITUDE: SyncWatch<RawMutex, UnitQuaternion<f32>> = SyncWatch::new()
 pub async fn task() {
     const PERIOD: Duration = Duration::from_hz(100);
 
-    let mut filter = ahrs::Madgwick::new(PERIOD.dt_f32(), 0.1);
+    let mut filter = ahrs::Madgwick::new(PERIOD.dt_secs_f32(), 0.1);
 
     let mut ticker = Ticker::every(PERIOD);
     loop {

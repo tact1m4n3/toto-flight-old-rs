@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-cpu-usage = []
 defmt = [
     "dep:defmt",
     "embassy-time/defmt",
@@ -14,11 +13,6 @@ defmt = [
 rp = ["dep:embassy-rp", "dep:pio"]
 
 [dependencies]
-cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
-cortex-m-rt = "0.7.5"
-
-critical-section = "1.2.0"
-
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }

@@ -1,7 +1,10 @@
-use core::{cell::RefCell, ops::Range};
+use core::{cell::RefCell, ops::Range, task::Poll};
 
-use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
-use embassy_time::Duration;
+use embassy_sync::{
+    blocking_mutex::{Mutex, raw::RawMutex},
+    waitqueue::MultiWakerRegistration,
+};
+use embassy_time::{Duration, Instant};
 use embedded_io_async::BufRead;
 use uom::si::{f32::Time, time::microsecond};
 
@@ -39,15 +42,15 @@ impl Mapping {
 }
 
 pub trait DurationExt {
-    fn time_f32(&self) -> Time;
-    fn dt_f32(&self) -> f32;
+    fn dt_f32(&self) -> Time;
+    fn dt_secs_f32(&self) -> f32;
 }
 
 impl DurationExt for Duration {
-    fn time_f32(&self) -> Time {
+    fn dt_f32(&self) -> Time {
         Time::new::<microsecond>(self.as_micros() as f32)
     }
-    fn dt_f32(&self) -> f32 {
+    fn dt_secs_f32(&self) -> f32 {
         self.as_micros() as f32 / 1_000_000.0
     }
 }
@@ -210,4 +213,85 @@ pub async fn read_process_and_consume<R: BufRead, F: FnMut(&[u8])>(
     };
     reader.consume(n);
     Ok(())
+}
+
+pub trait Periodic {
+    async fn next(&mut self) -> Duration;
+}
+
+impl Periodic for embassy_time::Ticker {
+    async fn next(&mut self) -> Duration {
+        self.next().await;
+        self.duration()
+    }
+}
+
+pub struct ManySignalState<const N: usize> {
+    wakers: MultiWakerRegistration<N>,
+    version: u32,
+    timestamp: Instant,
+    remaining_listeners: usize,
+}
+
+pub struct ManySignal<M: RawMutex, const N: usize> {
+    state: Mutex<M, RefCell<ManySignalState<N>>>,
+}
+
+impl<M: RawMutex, const N: usize> ManySignal<M, N> {
+    pub const fn new() -> Self {
+        Self {
+            state: Mutex::new(RefCell::new(ManySignalState {
+                wakers: MultiWakerRegistration::new(),
+                version: 0,
+                timestamp: Instant::MIN,
+                remaining_listeners: N,
+            })),
+        }
+    }
+
+    pub fn listener<'a>(&'a self) -> ManySignalListener<'a, M, N> {
+        let timestamp = self.state.lock(|state| {
+            let mut state = state.borrow_mut();
+            state.remaining_listeners += 1;
+            state.timestamp
+        });
+        ManySignalListener {
+            many_signal: self,
+            last_timestamp: timestamp,
+        }
+    }
+
+    pub fn signal_with_timestamp(&self, timestamp: Instant) {
+        self.state.lock(|state| {
+            let mut state = state.borrow_mut();
+            state.version = state.version.wrapping_add(1);
+            state.timestamp = timestamp;
+            state.wakers.wake();
+        });
+    }
+
+    pub fn signal(&self) {
+        self.signal_with_timestamp(Instant::now());
+    }
+}
+
+pub struct ManySignalListener<'a, M: RawMutex, const N: usize> {
+    many_signal: &'a ManySignal<M, N>,
+    last_timestamp: Instant,
+}
+
+impl<'a, M: RawMutex, const N: usize> Periodic for ManySignalListener<'a, M, N> {
+    async fn next(&mut self) -> Duration {
+        core::future::poll_fn(|ctx| {
+            self.many_signal.state.lock(|state| {
+                let mut state = state.borrow_mut();
+                if state.timestamp == self.last_timestamp {
+                    state.wakers.register(ctx.waker());
+                    return Poll::Pending;
+                }
+                Poll::Ready(state.timestamp - self.last_timestamp)
+            })
+        })
+        .await
+    }
 }

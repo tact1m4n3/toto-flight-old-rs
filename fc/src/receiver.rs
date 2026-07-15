@@ -6,15 +6,19 @@ use embassy_time::{Duration, Ticker};
 use embedded_io_async::{BufRead, Write};
 use nalgebra::Vector3;
 use uom::si::{
-    angle::degree, electric_charge::milliampere_hour, electric_current::deciampere,
-    electric_potential::decivolt, length::meter, velocity::meter_per_second,
+    angle::degree, angular_velocity::degree_per_second, electric_charge::milliampere_hour,
+    electric_current::deciampere, electric_potential::decivolt, length::meter,
+    velocity::meter_per_second,
 };
 
 use crate::{
-    RawMutex, control, msp, sensors,
-    utils::{SyncWatch, US_TO_NEG_ONE_ONE, read_process_and_consume},
+    RawMutex, control,
+    math::AngularVelocity3D,
+    sensors,
+    utils::{SyncWatch, US_TO_NEG_ONE_ONE, US_TO_ZERO_ONE, read_process_and_consume},
 };
 
+pub static CHANNELS: SyncWatch<RawMutex, Channels> = SyncWatch::new();
 pub static COMMAND: SyncWatch<RawMutex, control::Command> = SyncWatch::new();
 pub static LINK_STATS: SyncWatch<RawMutex, LinkStats> = SyncWatch::new();
 
@@ -26,7 +30,7 @@ pub struct LinkStats {
     pub downlink_rssi: u8,
 }
 
-static CHANNELS: Signal<RawMutex, Channels> = Signal::new();
+static CHANNELS_RECEIVED: Signal<RawMutex, ()> = Signal::new();
 
 pub async fn task_channels_manager() {
     let mut arm_switch = ChannelCondition {
@@ -53,9 +57,10 @@ pub async fn task_channels_manager() {
     };
 
     loop {
-        let channels = CHANNELS.wait().await;
-
-        msp::CHANNELS.set(channels.to_msp_format());
+        CHANNELS_RECEIVED.wait().await;
+        let Some(channels) = CHANNELS.get() else {
+            continue;
+        };
 
         arm_switch.update(&channels);
 
@@ -68,23 +73,23 @@ pub async fn task_channels_manager() {
         let command = if arm_switch.state {
             match flight_mode {
                 FlightMode::Manual => control::Command::Manual {
-                    throttle: channels.throttle(),
+                    throttle: US_TO_ZERO_ONE.map(channels.throttle() as f32),
                     throw: Vector3::new(
-                        channels.roll() as f32 - 1500.0,
-                        channels.pitch() as f32 - 1500.0,
-                        channels.yaw() as f32 - 1500.0,
+                        US_TO_NEG_ONE_ONE.map(channels.roll() as f32),
+                        US_TO_NEG_ONE_ONE.map(channels.pitch() as f32),
+                        US_TO_NEG_ONE_ONE.map(channels.yaw() as f32),
                     ),
                 },
                 FlightMode::Rate => control::Command::Rate {
-                    throttle: channels.throttle(),
-                    rate: Vector3::new(
-                        US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 45.0,
-                        US_TO_NEG_ONE_ONE.map(channels.pitch() as f32) * 45.0,
-                        US_TO_NEG_ONE_ONE.map(channels.yaw() as f32) * 45.0,
+                    throttle: US_TO_ZERO_ONE.map(channels.throttle() as f32),
+                    rate: AngularVelocity3D::new::<degree_per_second>(
+                        US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 90.0,
+                        US_TO_NEG_ONE_ONE.map(channels.pitch() as f32) * 90.0,
+                        US_TO_NEG_ONE_ONE.map(channels.yaw() as f32) * 90.0,
                     ),
                 },
                 FlightMode::Angle => control::Command::Angle {
-                    throttle: channels.throttle(),
+                    throttle: US_TO_NEG_ONE_ONE.map(channels.throttle() as f32),
                     roll_angle: US_TO_NEG_ONE_ONE.map(channels.roll() as f32) * 45.0,
                     pitch_angle: US_TO_NEG_ONE_ONE.map(channels.pitch() as f32) * 45.0,
                 },
@@ -117,7 +122,8 @@ pub async fn task_read_crsf<R: BufRead>(mut reader: R) {
                         let raw_channels: [u16; 16] =
                             core::array::from_fn(|i| crsf_read_raw_rc(raw_channels.0[i]));
                         let channels = Channels::from_aetr1234(&raw_channels);
-                        CHANNELS.signal(channels);
+                        CHANNELS.set(channels);
+                        CHANNELS_RECEIVED.signal(());
                     }
                     crsf::Packet::LinkStatistics(ls) => {
                         let link_stats = LinkStats {

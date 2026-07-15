@@ -16,10 +16,12 @@ use embassy_rp::{
     pwm, spi, uart, usb,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex as AsyncMutex};
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Duration, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use fixed::FixedU16;
 use static_cell::StaticCell;
+
+use fc::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b, motor::dshot_pio};
 
 #[cfg(feature = "debug")]
 use defmt_rtt as _;
@@ -28,7 +30,8 @@ use panic_probe as _;
 #[macro_use]
 extern crate fc;
 
-use fc::drivers::{battery::ina226::Ina226, imu::lsm6dsv::Lsm6dsv16b, motor::dshot_pio};
+#[cfg(feature = "debug")]
+mod cpu_usage;
 
 type Outputs =
     fc::control::Outputs<1, 2, dshot_pio::DshotPio<'static, PIO0>, [pwm::PwmOutput<'static>; 2]>;
@@ -389,8 +392,6 @@ async fn main(thread_spawner: Spawner) -> ! {
     low_prio_spawner.spawn(task_receiver_channels_manager().unwrap());
     low_prio_spawner.spawn(task_receiver_read_crsf(receiver_uart_rx).unwrap());
     low_prio_spawner.spawn(task_receiver_telemetry_crsf(receiver_uart_tx).unwrap());
-    // #[cfg(feature = "debug")]
-    // low_prio_spawner.spawn(task_sensors_debug_log().unwrap());
     low_prio_spawner.spawn(task_status_led(led_driver).unwrap());
     low_prio_spawner.spawn(task_usb_interface(usb_driver).unwrap());
     low_prio_spawner.spawn(task_vtx_msp_read(vtx_uart_rx).unwrap());
@@ -402,7 +403,7 @@ async fn main(thread_spawner: Spawner) -> ! {
     let _sd_card_buf_stream = sd_card_buf_stream;
 
     #[cfg(feature = "debug")]
-    let mut cpu_usage_tracker = fc::cpu_usage::Tracker::new(&mut _cp);
+    let mut cpu_usage_tracker = cpu_usage::Tracker::new(&mut _cp);
 
     loop {
         #[cfg(feature = "debug")]
@@ -418,12 +419,12 @@ async fn task_reboot() {
     loop {
         fc::REBOOT.wait().await;
         Timer::after(Duration::from_millis(100)).await;
-        if let Ok(_guard) = fc::control::ArmBlocker::new() {
-            info!("rebooting...");
-            cortex_m::peripheral::SCB::sys_reset();
-        } else {
+        if !fc::control::status().arm_state.is_armed() {
             warn!("reboot requested but system is armed, ignoring");
+            continue;
         }
+        info!("rebooting...");
+        cortex_m::peripheral::SCB::sys_reset();
     }
 }
 
@@ -505,12 +506,6 @@ async fn task_usb_interface(usb_driver: UsbDriver) {
 #[embassy_executor::task]
 async fn task_status_led(led_driver: PioWs2812Driver) {
     fc::status_led::task(led_driver).await;
-}
-
-#[cfg(feature = "debug")]
-#[embassy_executor::task]
-async fn task_sensors_debug_log() {
-    fc::sensors::debug_log::task().await;
 }
 
 #[cfg(feature = "debug")]

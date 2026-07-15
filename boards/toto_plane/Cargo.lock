@@ -757,9 +757,6 @@ version = "0.1.0"
 dependencies = [
  "ahrs",
  "block-device-adapters",
- "cortex-m",
- "cortex-m-rt",
- "critical-section",
  "crsf",
  "defmt",
  "embassy-embedded-hal",
@@ -2134,6 +2131,7 @@ dependencies = [
  "block-device-adapters",
  "cortex-m",
  "cortex-m-rt",
+ "critical-section",
  "defmt",
  "defmt-rtt",
  "embassy-embedded-hal",

@@ -84,6 +84,7 @@ impl<const N: usize> ShellParser<N> {
                     _ => Err(ShellParserError::InvalidCommand),
                 }
             }
+            Some("save") => Ok(ShellCommand::ConfigSave),
             Some(_) | None => Err(ShellParserError::InvalidCommand),
         }
     }
@@ -94,6 +95,7 @@ pub enum ShellCommand {
     Calibrate(CalibrationType),
     ConfigSet(ConfigSet),
     ConfigGet(ConfigGet),
+    ConfigSave,
 }
 
 pub enum CalibrationType {
@@ -105,24 +107,8 @@ pub enum ConfigSet {
     CraftName(String<16>),
 }
 
-impl From<ConfigSet> for config::UpdateItem {
-    fn from(item: ConfigSet) -> Self {
-        match item {
-            ConfigSet::CraftName(name) => config::UpdateItem::CraftName(name),
-        }
-    }
-}
-
 pub enum ConfigGet {
     CraftName,
-}
-
-impl core::fmt::Display for ConfigSet {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ConfigSet::CraftName(name) => write!(f, "{}", name),
-        }
-    }
 }
 
 #[derive(Debug)]

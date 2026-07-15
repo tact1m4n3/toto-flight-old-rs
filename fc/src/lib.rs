@@ -19,8 +19,6 @@ pub mod log;
 pub mod black_box;
 pub mod config;
 pub mod control;
-#[cfg(feature = "cpu-usage")]
-pub mod cpu_usage;
 pub mod drivers;
 pub mod math;
 pub mod msp;

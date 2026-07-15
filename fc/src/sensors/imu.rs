@@ -1,10 +1,10 @@
 use embassy_sync::signal::Signal;
 use nalgebra::{Matrix3, Rotation3, Vector3};
-use uom::si::angle::radian;
+use num_traits::Zero;
+use uom::si::{angle::radian, f32::Angle};
 
 use crate::{
     RawMutex, config,
-    control::ArmBlocker,
     drivers::imu::{Data as ImuSample, ImuSensor},
     math::{Acceleration3D, AngularVelocity3D, Vector3Ext},
     utils::SyncWatch,
@@ -20,8 +20,6 @@ pub struct Data {
     pub accel: Acceleration3D,
 }
 
-static TAKE_SAMPLE_SIGNAL: Signal<RawMutex, ()> = Signal::new();
-
 static CALIBRATE: Signal<RawMutex, ()> = Signal::new();
 static IMU_RAW_SAMPLE: Signal<RawMutex, ImuSample> = Signal::new();
 
@@ -29,18 +27,24 @@ pub fn start_calibration() {
     CALIBRATE.signal(());
 }
 
-pub async fn task_interrupt_listener<P: embedded_hal_async::digital::Wait>(mut interrupt_pin: P) {
+pub async fn task_read<P: embedded_hal_async::digital::Wait, I: ImuSensor>(
+    mut interrupt_pin: P,
+    mut imu: I,
+) {
+    let cfg = config::INITIAL.get().await;
+    let config::ImuCalibration {
+        gyro_bias,
+        accel_bias,
+        accel_scale,
+    } = cfg.imu_calibration.unwrap_or(config::ImuCalibration {
+        gyro_bias: AngularVelocity3D::ZEROS,
+        accel_bias: Acceleration3D::ZEROS,
+        accel_scale: Vector3::new(1.0, 1.0, 1.0),
+    });
+    let imu_to_body_transform = cfg.imu_to_body_transform.unwrap_or(Matrix3::identity());
+
     loop {
         interrupt_pin.wait_for_rising_edge().await.ok();
-        TAKE_SAMPLE_SIGNAL.signal(());
-    }
-}
-
-pub async fn task_read<I: ImuSensor>(mut imu: I) {
-    let cfg = config::INITIAL.get().await;
-
-    loop {
-        TAKE_SAMPLE_SIGNAL.wait().await;
 
         let Ok(data) = imu.read().await else {
             warn!("failed to read imu");
@@ -54,12 +58,12 @@ pub async fn task_read<I: ImuSensor>(mut imu: I) {
             mut accel,
         } = data;
 
-        gyro -= cfg.imu_calibration.gyro_bias;
-        gyro = gyro.transform(|v| cfg.imu_to_body_transform * v);
+        gyro -= gyro_bias;
+        gyro = gyro.transform(|v| imu_to_body_transform * v);
 
-        accel -= cfg.imu_calibration.accel_bias;
-        accel = accel.transform(|v| v.component_mul(&cfg.imu_calibration.accel_scale));
-        accel = accel.transform(|v| cfg.imu_to_body_transform * v);
+        accel -= accel_bias;
+        accel = accel.transform(|v| v.component_mul(&accel_scale));
+        accel = accel.transform(|v| imu_to_body_transform * v);
 
         DATA.set(Data { gyro, accel });
     }
@@ -68,11 +72,7 @@ pub async fn task_read<I: ImuSensor>(mut imu: I) {
 pub async fn task_calibrate() {
     loop {
         CALIBRATE.wait().await;
-        if let Ok(_guard) = ArmBlocker::new() {
-            easy_calibration().await;
-        } else {
-            warn!("ignoring imu calibration request because drone is armed");
-        }
+        easy_calibration().await;
     }
 }
 
@@ -111,7 +111,12 @@ async fn easy_calibration() {
     let unrotated_right = down.cross(&front_ref).normalize();
 
     // Apply the yaw offset around the Z (Down) axis
-    let board_rotation = Rotation3::new(down * cfg.board_forward_angle.get::<radian>());
+    let board_rotation = Rotation3::new(
+        down * cfg
+            .board_forward_angle
+            .unwrap_or(Angle::zero())
+            .get::<radian>(),
+    );
     let right = board_rotation * unrotated_right;
 
     // In FRD, Right x Down = Front
@@ -126,16 +131,13 @@ async fn easy_calibration() {
 
     let gyro_bias = gyro_mean;
 
-    config::UpdateItem::ImuCalibration(config::ImuCalibration {
-        gyro_bias,
-        ..cfg.imu_calibration
-    })
-    .commit()
-    .await
-    .ok();
-    config::UpdateItem::ImuToBodyTransform(imu_to_body_transform)
-        .commit()
-        .await
-        .ok();
-    crate::REBOOT.signal(());
+    config::UPDATE.lock(|cfg| {
+        let mut cfg = cfg.borrow_mut();
+        cfg.imu_calibration = Some(config::ImuCalibration {
+            gyro_bias,
+            accel_bias: Acceleration3D::ZEROS,
+            accel_scale: Vector3::new(1.0, 1.0, 1.0),
+        });
+        cfg.imu_to_body_transform = Some(imu_to_body_transform);
+    });
 }

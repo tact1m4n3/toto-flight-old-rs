@@ -10,7 +10,9 @@ use static_cell::StaticCell;
 
 use crate::{
     config, sensors,
-    usb_interface::shell_parser::{CalibrationType, ConfigGet, ShellCommand, ShellParser},
+    usb_interface::shell_parser::{
+        CalibrationType, ConfigGet, ConfigSet, ShellCommand, ShellParser,
+    },
 };
 
 mod shell_parser;
@@ -57,18 +59,16 @@ async fn shell_cdc_run<D: Driver<'static>>(mut cdc: CdcAcmClass<'static, D>) {
     loop {
         cdc.wait_connection().await;
         info!("usb connected");
-        // if let Ok(_guard) = ArmBlocker::new() {
         _ = shell(&mut cdc).await;
-        // }
         info!("usb disconnected");
     }
 }
 
 async fn shell<D: Driver<'static>>(cdc: &mut CdcAcmClass<'static, D>) -> Result<(), EndpointError> {
+    let cfg = config::INITIAL.get().await;
+
     let mut buf = [0; 64];
     let mut parser = ShellParser::<32>::new();
-
-    let cfg = config::INITIAL.get().await;
 
     loop {
         let n = cdc.read_packet(&mut buf).await?;
@@ -90,13 +90,26 @@ async fn shell<D: Driver<'static>>(cdc: &mut CdcAcmClass<'static, D>) -> Result<
                         _ = write!(response, "imu calibration started")
                     }
                     ShellCommand::ConfigGet(config_item) => match config_item {
-                        ConfigGet::CraftName => _ = write!(response, "{}", cfg.craft_name),
+                        ConfigGet::CraftName => {
+                            if let Some(ref craft_name) = cfg.craft_name {
+                                _ = write!(response, "{}", craft_name);
+                            }
+                        }
                     },
                     ShellCommand::ConfigSet(config_item) => {
-                        match config::UpdateItem::from(config_item).commit().await {
-                            Ok(()) => _ = write!(response, "config updated successfully"),
-                            Err(_) => _ = write!(response, "error updating config"),
-                        }
+                        config::UPDATE.lock(|cfg| {
+                            let mut cfg = cfg.borrow_mut();
+                            match config_item {
+                                ConfigSet::CraftName(name) => {
+                                    cfg.craft_name = Some(name);
+                                }
+                            }
+                        });
+                        _ = write!(response, "config updated");
+                    }
+                    ShellCommand::ConfigSave => {
+                        _ = write!(response, "rebooting...");
+                        config::SAVE.signal(());
                     }
                 },
                 Err(err) => _ = write!(response, "error parsing command: {err}"),

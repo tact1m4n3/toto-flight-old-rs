@@ -5,7 +5,6 @@ edition = "2024"
 
 [features]
 debug = [
-    "fc/cpu-usage",
     "fc/defmt",
     "dep:defmt",
     "dep:defmt-rtt",
@@ -17,6 +16,8 @@ fc = { path = "../../fc", features = ["rp"] }
 
 cortex-m = { version = "0.7.7", features = ["inline-asm", "critical-section-single-core"] }
 cortex-m-rt = "0.7.5"
+
+critical-section = "1.2.0"
 
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
